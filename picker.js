@@ -372,3 +372,118 @@ function pkBuild(text) {
   for (const d of pkDatesFor(id, text)) add(d.targets, d.value, d.snippet, d.note);
   return out;
   }
+/* ===== picker.js v4 - PART B. Add to the END of the file. ===== */
+function buildSuggestions(text) {
+  return pkBuild(text);
+}
+
+// Review panel: shows the detected type and the version tag
+function renderReview(statusText) {
+  let box = $('review');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'review';
+    box.className = 'review';
+    $('ocr-status').after(box);
+  }
+  box.innerHTML = '';
+
+  const head = document.createElement('p');
+  head.className = 'hint';
+  head.textContent = statusText + (PK_LAST ? ' Detected: ' + PK_LAST + '.' : '') + '  [' + PK_VERSION + ']';
+  box.appendChild(head);
+  if (!suggestions.length) return;
+
+  box.appendChild(pkBtn('Approve best suggestion for each field', () => {
+    const used = new Set();
+    const keep = [];
+    for (const s of suggestions) {
+      const t = s.targets[0];
+      if (s.targets.length === 1 && !used.has(t)) {
+        used.add(t);
+        $(PK_FIELD[t]).value = s.value;
+      } else {
+        keep.push(s);
+      }
+    }
+    suggestions = keep;
+    renderReview('Applied best suggestion for each field. Check the form, then tap Save.');
+  }));
+
+  suggestions.forEach((s, i) => {
+    const card = document.createElement('div');
+    card.className = 'sugg';
+
+    const strong = document.createElement('strong');
+    strong.textContent = s.targets.map(t => PK_LABEL[t]).join(' or ') + ': ' + s.value;
+    const small = document.createElement('small');
+    small.textContent = (s.note ? s.note + ' · ' : '') + 'Found in: "' + s.snippet + '"';
+    card.append(strong, small);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    const done = (msg, field) => {
+      if (field) $(PK_FIELD[field]).value = s.value;
+      suggestions.splice(i, 1);
+      renderReview(msg);
+    };
+
+    if (s.targets.length > 1) {
+      for (const t of s.targets) {
+        row.appendChild(pkBtn('Use as ' + PK_LABEL[t].toLowerCase(),
+          () => done('Applied. Check the form, then tap Save.', t)));
+      }
+    } else {
+      const t = s.targets[0];
+      row.appendChild(pkBtn('Approve', () => done('Approved. Check the form, then tap Save.', t)));
+      row.appendChild(pkBtn('Edit', () => {
+        $(PK_FIELD[t]).value = s.value;
+        suggestions.splice(i, 1);
+        renderReview('Filled in. Change it in the form, then tap Save.');
+        $(PK_FIELD[t]).focus();
+      }, true));
+    }
+    row.appendChild(pkBtn('Dismiss', () => done('Dismissed.', null), true));
+    card.appendChild(row);
+    box.appendChild(card);
+  });
+}
+
+/* ---------- self-test on sample text from your documents ---------- */
+const PK_DL_SAMPLE = `DL No. : MH13 20090023095 DOI : 02/07/2009 FORM - 7 [See Rule 16(2)] NAME : KSHITIJ SHRIVASTAVA D.O.B : 11/08/1974 B.G. : B+ VALID TILL : 10/08/2034(NT) VALID THROUGHOUT INDIA COV : LMV 02/07/2009 : MCWG 02/07/2009 S/o : LALITKUMAR ADDRESS : G-501 PURVA SKYWOOD SILVER COUNTY BANGALORE 560068 Sign. Licencing Authority BENGALURU(S) CDOI : 23-08-2024`;
+const PK_CAR_SAMPLE = `Insured Details Name Mr KSHITIJ SHRIVASTAVA Address TOWER-3, FLAT NO 5B1 Policy No. 0157681764 09 00 Client ID 6014438842
+Coverage Details Valid From Valid Till Own Damage Cover 30/10/2026 (00:00 Hrs) 29/10/2027 (Midnight) Third-Party Cover 30/10/2026 (00:00 Hrs) 29/10/2027 (Midnight)
+Auto Secure - Private Car Package Policy Certificate of Insurance Cum Policy Schedule
+Registration No. WB 06 L 2307 MAKE MARUTI / WAGON R Date of Registration 21/10/2014 Chassis No. 794699
+Receipt Date 19/10/2026 GSTIN 19AABCT3518Q1ZT
+Previous Insurance Details Date of Expiry: 29/10/2026 OD Cover Period: 30/10/2025(00:00 Hrs) to 29/10/2026(Midnight)`;
+
+function pkSelfTest() {
+  const tests = [
+    { name: 'Driving licence', text: PK_DL_SAMPLE, expect: {
+        title: 'Driving licence - Kshitij Shrivastava', type: 'Identity',
+        number: 'MH1320090023095', issue: '2009-07-02', expiry: '2034-08-10' } },
+    { name: 'Car insurance', text: PK_CAR_SAMPLE, expect: {
+        title: 'Car insurance - WB06L2307', type: 'Insurance',
+        number: '0157681764 09 00', issue: '2026-10-30', expiry: '2027-10-29' } }
+  ];
+  const lines = [];
+  for (const t of tests) {
+    const got = pkBuild(t.text);
+    lines.push('-- ' + t.name + ' (detected: ' + (PK_LAST || 'none') + ')');
+    for (const k of Object.keys(t.expect)) {
+      const s = got.find(x => x.targets.length === 1 && x.targets[0] === k);
+      const ok = !!s && s.value === t.expect[k];
+      lines.push((ok ? 'PASS  ' : 'FAIL  ') + k + ': ' + (s ? s.value : 'nothing found') +
+        (ok ? '' : '  (expected ' + t.expect[k] + ')'));
+    }
+  }
+  alert(PK_VERSION + ' self-test\n\n' + lines.join('\n'));
+}
+(function pkAddSelfTestButton() {
+  const bk = document.querySelector('.backup');
+  if (!bk || document.getElementById('pk-selftest')) return;
+  const b = pkBtn('Run picker self-test', pkSelfTest, true);
+  b.id = 'pk-selftest';
+  bk.appendChild(b);
+})();
