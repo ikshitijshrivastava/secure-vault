@@ -1050,3 +1050,186 @@ function buildSuggestions(text) {
   for (const d of buildDates(text)) add(d.targets, d.value, d.snippet);
   return out;
                                  }
+/* ================= Smart picker v2 (part 1: reading the text) ================= */
+
+const VALID_STATES = new Set([
+  'AN', 'AP', 'AR', 'AS', 'BR', 'BH', 'CG', 'CH', 'DD', 'DL', 'DN', 'GA', 'GJ',
+  'HP', 'HR', 'JH', 'JK', 'KA', 'KL', 'LA', 'LD', 'MH', 'ML', 'MN', 'MP', 'MZ',
+  'NL', 'OD', 'PB', 'PY', 'RJ', 'SK', 'TN', 'TG', 'TS', 'TR', 'UP', 'UK', 'UA', 'WB'
+]);
+const toLetters = s => s.replace(/0/g, 'O').replace(/1/g, 'I').replace(/5/g, 'S').replace(/8/g, 'B');
+const toDigits = s => s.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/B/g, '8');
+
+// Read every page of a PDF, not just the first few
+async function pdfText(pdf) {
+  let text = '';
+  const last = Math.min(pdf.numPages, 25);
+  for (let i = 1; i <= last; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(' ') + '\n';
+  }
+  return text;
+}
+
+// Document kinds. Specific kinds are counted; the generic one is used only if nothing else matches.
+const DOC_KINDS = [
+  { kind: 'Life insurance', type: 'Insurance', person: true,
+    re: /life\s+(insurance|assurance|cover)|term\s+(plan|insurance)|endowment|sum\s+assured/ },
+  { kind: 'Health insurance', type: 'Insurance', person: true,
+    re: /health\s+insurance|mediclaim|medical\s+insurance|health\s+card/ },
+  { kind: 'Car insurance', type: 'Insurance', vehicle: true,
+    re: /motor\s+(insurance|policy)|car\s+insurance|vehicle\s+insurance|two[\s-]?wheeler\s+insurance|own\s+damage|third[\s-]?party|private\s+car|package\s+policy|auto\s+secure/ },
+  { kind: 'Travel insurance', type: 'Insurance', person: true, re: /travel\s+insurance/ },
+  { kind: 'Home insurance', type: 'Insurance', re: /home\s+insurance|property\s+insurance/ },
+  { kind: 'Vehicle registration (RC)', type: 'Vehicle', vehicle: true,
+    re: /registration\s+certificate|certificate\s+of\s+registration|registering\s+authority|chassis/ },
+  { kind: 'Driving licence', type: 'Identity', person: true, re: /driving\s+licen[cs]e|driver'?s?\s+licen[cs]e/ },
+  { kind: 'Passport', type: 'Identity', person: true, re: /\bpassport\b/ },
+  { kind: 'ID card', type: 'Identity', person: true,
+    re: /aadhaar|aadhar|national identity|identity card|\bid card\b|permanent account number/ },
+  { kind: 'Certificate', type: 'Certificate', person: true, re: /certif(icate|y)|this is to certify/ },
+  { kind: 'Property document', type: 'Property', re: /sale\s+deed|property|land\s+record/ },
+  { kind: 'Financial document', type: 'Financial', re: /bank\s+statement|statement\s+of\s+account|\btax\b|\binvoice\b/ },
+  { kind: 'Insurance policy', type: 'Insurance', person: true, generic: true,
+    re: /insurance|policy\s*(holder|no|number)|premium/ }
+];
+
+function countHits(re, text) {
+  return (text.match(new RegExp(re.source, 'gi')) || []).length;
+}
+function pickKind(text) {
+  let best = null;
+  for (const k of DOC_KINDS) {
+    if (k.generic) continue;
+    const n = countHits(k.re, text);
+    if (n && (!best || n > best.n)) best = { k, n };
+  }
+  if (best) return best.k;
+  return DOC_KINDS.find(k => k.generic && countHits(k.re, text)) || null;
+}
+
+// Words that are never part of a person's name
+const NAME_BLOCK = /^(of|the|and|name|policy|number|no|date|address|holder|insured|owner|registered|motor|vehicle|son|daughter|wife|husband|dob|sex|male|female|issue|valid|from|till|expiry|nominee|premium|mobile|email|phone|contact|client|id|gstin|insurance|company|limited|ltd|bank|plan|certificate|tower|flat|road|nagar|city|state|pin|code|for|to|hrs|midnight|make|model|fuel|engine|chassis|cover|damage|third|party|own|period|details|key|information)$/i;
+
+function findPersonName(text) {
+  const label = /(policy\s*holder'?s?\s*name|insured\s*name|name\s+of\s+(?:the\s+)?(?:holder|insured|candidate|student|employee|person|nominee)|full\s+name|certify\s+that|issued\s+to|\bname)\s*[:\-]?\s*/gi;
+  for (const m of text.matchAll(label)) {
+    const words = [];
+    const chunk = text.slice(m.index + m[0].length, m.index + m[0].length + 120);
+    for (const raw of chunk.split(/\s+/)) {
+      const w = raw.replace(/[^A-Za-z.'-]/g, '');
+      if (!w) continue;
+      if (!words.length && /^(mr|mrs|ms|miss|dr|shri|smt|kum)\.?$/i.test(w)) continue;
+      if (NAME_BLOCK.test(w)) break;
+      words.push(w);
+      if (words.length === 4) break;
+    }
+    if (words.length >= 2) {
+      return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+    }
+  }
+  return null;
+}
+
+// Policy or document number, allowing spaces (e.g. "0157681764 09 00")
+function takeTokens(text, start) {
+  const toks = [];
+  for (const t of text.slice(start, start + 60).split(/\s+/)) {
+    if (!t) continue;
+    if (!/^[A-Z0-9\/\-]+$/i.test(t) || !/\d/.test(t)) break;
+    toks.push(t.toUpperCase());
+    if (toks.length === 4) break;
+  }
+  return toks.join(' ');
+}
+function findNumber(text) {
+  const p = /policy\s*(?:no|number|num)\.?\s*[:\-#]?\s*/i.exec(text);
+  if (p) {
+    const v = takeTokens(text, p.index + p[0].length);
+    if (v) return v;
+  }
+  const g = /(certificate|passport|licen[cs]e|\bpan|document|cover\s*note|member|client)\s*(?:id|no|number)\.?\s*[:\-#]?\s*/i.exec(text);
+  if (g) {
+    const v = takeTokens(text, g.index + g[0].length);
+    if (v) return v;
+  }
+  return null;
+}
+
+// Vehicle numbers, ignoring spaces, dots and hyphens. Only valid state codes are accepted.
+function vehicleCandidates(text) {
+  const up = text.toUpperCase();
+  const found = new Map();
+  const std = /(?<![A-Z0-9])([A-Z0-9]{2})[\s.\-]*([0-9OIL]{1,2})[\s.\-]*([A-Z0-9]{1,3})[\s.\-]*([0-9OILSB]{4})(?![0-9])/g;
+  for (const m of up.matchAll(std)) {
+    const state = toLetters(m[1]);
+    if (!VALID_STATES.has(state)) continue;
+    const series = toLetters(m[3]);
+    const value = `${state}${toDigits(m[2]).padStart(2, '0')}${series}${toDigits(m[4])}`;
+    if (!/^[A-Z]{2}\d{2}[A-Z]{1,3}\d{4}$/.test(value)) continue;
+    const before = up.slice(Math.max(0, m.index - 40), m.index);
+    const score = /regn|registration|reg\.?\s*no|vehicle|veh/i.test(before) ? 4 : 1;
+    const prev = found.get(value);
+    if (!prev || prev.score < score) found.set(value, { value, score, idx: m.index });
+  }
+  const bh = /(?<![A-Z0-9])(\d{2})[\s.\-]*BH[\s.\-]*([0-9OILSB]{4})[\s.\-]*([A-Z]{1,2})(?![A-Z])/g;
+  for (const m of up.matchAll(bh)) {
+    const value = `${m[1]}BH${toDigits(m[2])}${m[3]}`;
+    if (!found.has(value)) found.set(value, { value, score: 1, idx: m.index });
+  }
+  return [...found.values()].sort((a, b) => b.score - a.score || a.idx - b.idx);
+}
+
+// Dates: a pair about one year apart after a cover label is treated as the policy period
+const COVER_ANCHOR = /own\s*damage|\bod\s*(cover|period)|third[\s-]?party|\btp\s*(cover|period)|policy\s*period|period\s*of\s*insurance|cover\s*period|valid\s*(from|till|upto|until)/i;
+const NOT_POLICY_DATE = /birth|\bdob\b|d\.o\.b|registration|receipt|previous|prior|premium/i;
+const snipDate = (text, a, b) =>
+  text.slice(Math.max(0, a - 30), Math.min(text.length, b + 12)).replace(/\s+/g, ' ').trim().slice(0, 110);
+
+function smartDates(text) {
+  const all = findDates(text).filter(d =>
+    !NOT_POLICY_DATE.test(text.slice(Math.max(0, d.idx - 40), d.idx)));
+
+  const pairs = [];
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length && j < i + 6; j++) {
+      const a = all[i], b = all[j];
+      const days = (Date.parse(b.value) - Date.parse(a.value)) / 86400000;
+      if (days < 340 || days > 390) continue;
+      const anchored = COVER_ANCHOR.test(text.slice(Math.max(0, a.idx - 120), a.idx));
+      pairs.push({ a, b, anchored: anchored ? 1 : 0 });
+    }
+  }
+  if (pairs.length) {
+    const ranked = pairs.map(p => {
+      const [from, till] = p.a.value < p.b.value ? [p.a, p.b] : [p.b, p.a];
+      return { from, till, anchored: p.anchored };
+    }).sort((x, y) => (y.anchored - x.anchored) ||
+      (y.till.value < x.till.value ? -1 : y.till.value > x.till.value ? 1 : 0));
+    const best = ranked[0];
+    const s = snipDate(text, best.from.idx, best.till.idx + best.till.len);
+    return [
+      { targets: ['issue'], value: best.from.value, snippet: s, note: 'Policy period' },
+      { targets: ['expiry'], value: best.till.value, snippet: s, note: 'Policy period' }
+    ];
+  }
+
+  // No clear pair: use nearby words, or offer both choices
+  const out = [];
+  const seen = new Set();
+  for (const d of all) {
+    if (seen.has(d.value)) continue;
+    seen.add(d.value);
+    const before = text.slice(Math.max(0, d.idx - 30), d.idx).toLowerCase();
+    const s = snipDate(text, d.idx, d.idx + d.len);
+    if (/expir|expires|renew|due\s*date|valid\s*upto|valid\s*until/.test(before)) {
+      out.push({ targets: ['expiry'], value: d.value, snippet: s, note: '' });
+    } else if (/issued|issue\s*date|dated|granted\s*on/.test(before)) {
+      out.push({ targets: ['issue'], value: d.value, snippet: s, note: '' });
+    } else {
+      out.push({ targets: ['issue', 'expiry'], value: d.value, snippet: s, note: 'Check which date this is' });
+    }
+  }
+  return out.slice(0, 4);
+  }
