@@ -1,5 +1,5 @@
-/* ===== picker.js: smart document picker (v3). Loads after app.js and overrides its reading and suggestion functions. ===== */
-const PK_VERSION = 'Smart picker v3';
+/* ===== picker.js v4 - PART A. Replace the whole file with this. ===== */
+const PK_VERSION = 'Smart picker v4';
 const PK_LIB = {
   pdfjs: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   pdfWorker: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
@@ -10,33 +10,43 @@ const PK_STATES = new Set(['AN','AP','AR','AS','BR','BH','CG','CH','DD','DL','DN
 const PK_FIELD = { title: 'f-title', type: 'f-type', number: 'f-number', issue: 'f-issue', expiry: 'f-expiry' };
 const PK_LABEL = { title: 'Title', type: 'Type', number: 'Document number', issue: 'Issue date', expiry: 'Expiry date' };
 const PK_MONTHS = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
-const PK_EXCLUDE = /birth|\bdob\b|d\.o\.b|registration|receipt|gstin/i;
-const PK_COVER = /own\s*damage|third[\s-]?party|\bod\b|\btp\b|valid\s*(from|till|upto|until)|policy\s*period|period\s*of\s*insurance|cover\s*period/i;
-const PK_NAME_BLOCK = /^(of|the|and|name|policy|number|no|date|address|holder|insured|owner|registered|motor|vehicle|son|daughter|wife|husband|dob|sex|male|female|issue|valid|from|till|expiry|nominee|premium|mobile|email|phone|contact|client|id|gstin|insurance|company|limited|ltd|bank|plan|certificate|tower|flat|road|nagar|city|state|pin|code|for|to|hrs|midnight|make|model|fuel|engine|chassis|cover|damage|third|party|own|period|details|key|information)$/i;
+let PK_LAST = null;   // last detected document type, shown in the status line
 
-// Document kinds. The kind with the most keyword hits wins; "generic" is used only if nothing else matches.
-const PK_KINDS = [
-  { kind: 'Life insurance', type: 'Insurance', person: true, re: /life\s+(insurance|assurance|cover)|term\s+(plan|insurance)|endowment|sum\s+assured/ },
-  { kind: 'Health insurance', type: 'Insurance', person: true, re: /health\s+insurance|mediclaim|medical\s+insurance/ },
-  { kind: 'Car insurance', type: 'Insurance', vehicle: true, re: /motor\s+(insurance|policy)|car\s+insurance|vehicle\s+insurance|two[\s-]?wheeler\s+insurance|own\s+damage|third[\s-]?party|private\s+car|package\s+policy|auto\s+secure/ },
-  { kind: 'Travel insurance', type: 'Insurance', person: true, re: /travel\s+insurance/ },
-  { kind: 'Home insurance', type: 'Insurance', re: /home\s+insurance|property\s+insurance/ },
-  { kind: 'Vehicle registration (RC)', type: 'Vehicle', vehicle: true, re: /registration\s+certificate|certificate\s+of\s+registration|registering\s+authority|chassis/ },
-  { kind: 'Driving licence', type: 'Identity', person: true, re: /driving\s+licen[cs]e|driver'?s?\s+licen[cs]e/ },
-  { kind: 'Passport', type: 'Identity', person: true, re: /\bpassport\b/ },
-  { kind: 'ID card', type: 'Identity', person: true, re: /aadhaar|aadhar|national identity|identity card|\bid card\b|permanent account number/ },
-  { kind: 'Certificate', type: 'Certificate', person: true, re: /certif(icate|y)|this is to certify/ },
-  { kind: 'Property document', type: 'Property', re: /sale\s+deed|property|land\s+record/ },
-  { kind: 'Financial document', type: 'Financial', re: /bank\s+statement|statement\s+of\s+account|\btax\b|\binvoice\b/ },
-  { kind: 'Insurance policy', type: 'Insurance', person: true, generic: true, re: /insurance|policy\s*(holder|no|number)|premium/ }
+// Words that mark the start of the next field; value capture stops here
+const PK_STOP = /\b(d\.?\s?o\.?\s?b|date\s+of\s+birth|doi|cdoi|valid|address|s\s?\/\s?o|sign|cov|b\.?g|dl\s*no|licen[cs]e\s*no|name|policy\s*no|registration|reg\.?\s*no|chassis|engine|make|model|issue|expiry|date)\b/i;
+// Words that are never part of a person's name
+const PK_NAME_BLOCK = /^(of|the|and|name|policy|number|no|date|address|holder|insured|owner|registered|motor|vehicle|son|daughter|wife|husband|dob|sex|male|female|issue|valid|from|till|expiry|nominee|premium|mobile|email|phone|contact|client|id|gstin|insurance|company|limited|ltd|bank|plan|certificate|tower|flat|road|nagar|city|state|code|for|to|hrs|midnight|make|model|fuel|engine|chassis|cover|damage|third|party|own|period|details|key|information|so|do|co|licence|licencing|authority|sign|throughout|india|bg|cov|cdoi|doi|birth|bangalore|karnataka)$/i;
+// Context words that mean a date is NOT a policy or document date
+const PK_DOB_CTX = /birth|d\.?\s?o\.?\s?b|cdoi|\bcov\b|registration|receipt|gstin|previous|prior/i;
+const PK_COVER = /own\s*damage|third[\s-]?party|\bod\b|\btp\b|valid\s*(from|till|upto|until|to)|policy\s*period|period\s*of\s*insurance|cover\s*period/i;
+
+// Document types. The type with the most keyword hits wins. "weak" is used only when nothing else matches.
+const PK_PROFILES = [
+  { id: 'dl', kind: 'Driving licence', type: 'Identity', person: true,
+    re: /driving\s+licen[cs]e|driver'?s?\s+licen[cs]e|valid\s+throughout\s+india|\bLMV\b|\bMCWG\b|licencing\s+authority|form\s*-?\s*7|rule\s*16|\bDL\s*no/i },
+  { id: 'car', kind: 'Car insurance', type: 'Insurance', vehicle: true,
+    re: /motor\s+(insurance|policy)|car\s+insurance|vehicle\s+insurance|two[\s-]?wheeler|own\s+damage|third[\s-]?party|private\s+car|package\s+policy|auto\s+secure|\bidv\b|\bncb\b|policy\s+schedule/i },
+  { id: 'life', kind: 'Life insurance', type: 'Insurance', person: true,
+    re: /life\s+(insurance|assurance|cover)|term\s+(plan|insurance)|endowment|sum\s+assured|life\s+assured/i },
+  { id: 'health', kind: 'Health insurance', type: 'Insurance', person: true,
+    re: /health\s+(insurance|card|policy)|mediclaim|cashless\s+hospital|family\s+floater/i },
+  { id: 'rc', kind: 'Vehicle registration (RC)', type: 'Vehicle', vehicle: true,
+    re: /registration\s+certificate|certificate\s+of\s+registration|registering\s+authority|chassis\s+no|regn\.?\s*no/i },
+  { id: 'passport', kind: 'Passport', type: 'Identity', person: true,
+    re: /\bpassport\b|republic\s+of\s+india|nationality|place\s+of\s+birth|P<IND/i },
+  { id: 'aadhaar', kind: 'Aadhaar card', type: 'Identity', person: true,
+    re: /aadhaar|aadhar|unique\s+identification|\buidai\b/i },
+  { id: 'pan', kind: 'PAN card', type: 'Identity', person: true,
+    re: /permanent\s+account\s+number|income\s+tax\s+department|\bPAN\s+card\b/i },
+  { id: 'cert', kind: 'Certificate', type: 'Certificate', person: true,
+    re: /certif(icate|y)|this\s+is\s+to\s+certify/i },
+  { id: 'property', kind: 'Property document', type: 'Property',
+    re: /sale\s+deed|property|land\s+record/i },
+  { id: 'finance', kind: 'Financial document', type: 'Financial',
+    re: /bank\s+statement|statement\s+of\s+account|\btax\b|\binvoice\b/i },
+  { id: 'insgen', kind: 'Insurance policy', type: 'Insurance', person: true, weak: true,
+    re: /insurance|premium|policy/i }
 ];
-
-const PK_SAMPLE = `Insured Details Name Mr KSHITIJ SHRIVASTAVA Address TOWER-3, FLAT NO 5B1 Policy No. 0157681764 09 00 Client ID 6014438842
-Coverage Details Valid From Valid Till Own Damage Cover 30/10/2026 (00:00 Hrs) 29/10/2027 (Midnight) Third-Party Cover 30/10/2026 (00:00 Hrs) 29/10/2027 (Midnight)
-Auto Secure - Private Car Package Policy Certificate of Insurance Cum Policy Schedule
-Registration No. WB 06 L 2307 MAKE MARUTI / WAGON R Date of Registration 21/10/2014 Chassis No. 794699
-Receipt Date 19/10/2026 GSTIN 19AABCT3518Q1ZT
-Previous Insurance Details Date of Expiry: 29/10/2026 OD Cover Period: 30/10/2025(00:00 Hrs) to 29/10/2026(Midnight)`;
 
 /* ---------- small helpers ---------- */
 const pkLetters = s => s.replace(/0/g, 'O').replace(/1/g, 'I').replace(/5/g, 'S').replace(/8/g, 'B');
@@ -45,6 +55,10 @@ const pkValid = (y, m, d) => y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >=
 const pkIso = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 function pkSnip(text, a, b) {
   return text.slice(Math.max(0, a - 30), Math.min(text.length, b + 12)).replace(/\s+/g, ' ').trim().slice(0, 110);
+}
+function pkRegexSnip(text, re) {
+  const m = new RegExp(re.source, 'i').exec(text);
+  return m ? pkSnip(text, m.index, m.index + m[0].length) : '';
 }
 function pkBtn(text, fn, ghost) {
   const b = document.createElement('button');
@@ -78,11 +92,16 @@ async function pkLoadOcr() {
   try { await pkLoadScript(PK_LIB.tesseract); } catch { return false; }
   return !!window.Tesseract;
 }
-async function pkOcrBlob(blob) {
+// Photos get two passes: normal layout, then sparse text (good for ID cards)
+async function pkOcrBlob(blob, twoPasses) {
   const worker = await Tesseract.createWorker('eng', 1, { langPath: PK_LIB.lang });
   try {
-    const { data } = await worker.recognize(blob);
-    return data.text || '';
+    let text = (await worker.recognize(blob)).data.text || '';
+    if (twoPasses) {
+      await worker.setParameters({ tessedit_pageseg_mode: '11' });
+      text += '\n' + ((await worker.recognize(blob)).data.text || '');
+    }
+    return text;
   } finally {
     await worker.terminate();
   }
@@ -106,7 +125,7 @@ async function pkPageImage(pdf, n) {
   return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
 }
 
-// Overrides app.js: reads every PDF page; scanned PDFs and images use OCR
+// Replaces the reader in app.js: PDFs (text or scanned) and photos (JPG/PNG)
 async function readDocument(file) {
   if (file.type === 'application/pdf') {
     if (!(await pkLoadPdf())) return { error: 'Could not load the PDF reader. Check internet and try again.' };
@@ -117,19 +136,19 @@ async function readDocument(file) {
       if (!(await pkLoadOcr())) return { error: 'Scanned PDF needs the OCR engine. Check internet and try again.' };
       text = '';
       for (let i = 1; i <= Math.min(pdf.numPages, 3); i++) {
-        text += await pkOcrBlob(await pkPageImage(pdf, i)) + '\n';
+        text += await pkOcrBlob(await pkPageImage(pdf, i), false) + '\n';
       }
     }
     return { text };
   }
   if (file.type.startsWith('image/')) {
     if (!(await pkLoadOcr())) return { error: 'Could not load the OCR engine. Check internet and try again.' };
-    return { text: await pkOcrBlob(file) };
+    return { text: await pkOcrBlob(file, true) };
   }
   return { error: 'Unsupported file type.' };
 }
 
-/* ---------- finding details ---------- */
+/* ---------- finding dates ---------- */
 function pkFindDates(text) {
   const out = [];
   const pats = [
@@ -147,15 +166,39 @@ function pkFindDates(text) {
   }
   return out.sort((a, b) => a.idx - b.idx);
 }
-
-// Policy period = two dates about a year apart, next to cover words. Latest period wins.
-function pkDates(text) {
-  const all = pkFindDates(text).filter(d => !PK_EXCLUDE.test(text.slice(Math.max(0, d.idx - 40), d.idx)));
-  const anch = new Set(all.filter(d => PK_COVER.test(text.slice(Math.max(0, d.idx - 120), d.idx))).map(d => d.value));
+// First date that appears just after a label (e.g. "VALID TILL : 10/08/2034")
+function pkDateNear(text, labelRe) {
+  const re = new RegExp(labelRe.source, 'gi');
+  for (const m of text.matchAll(re)) {
+    const start = m.index + m[0].length;
+    const d = pkFindDates(text.slice(start, start + 30))[0];
+    if (d && d.idx <= 12) return { value: d.value, idx: start + d.idx, len: d.len };
+  }
+  return null;
+}
+// Labelled dates: issue and expiry, ignoring a pair that is out of order
+function pkLabelled(text, issueRe, expiryRe, fallback) {
+  const out = [];
+  let i = issueRe ? pkDateNear(text, issueRe) : null;
+  const e = expiryRe ? pkDateNear(text, expiryRe) : null;
+  if (i && e && i.value >= e.value) i = null;
+  if (i) out.push({ targets: ['issue'], value: i.value, snippet: pkSnip(text, i.idx, i.idx + i.len), note: '' });
+  if (e) out.push({ targets: ['expiry'], value: e.value, snippet: pkSnip(text, e.idx, e.idx + e.len), note: '' });
+  if (!out.length && fallback) {
+    const all = pkFindDates(text).filter(d => !PK_DOB_CTX.test(text.slice(Math.max(0, d.idx - 30), d.idx)));
+    for (const d of all.slice(0, 3)) {
+      out.push({ targets: ['issue', 'expiry'], value: d.value, snippet: pkSnip(text, d.idx, d.idx + d.len), note: 'Check which date this is' });
+    }
+  }
+  return out;
+}
+// Insurance period: two dates about a year apart next to cover words. Latest period wins.
+function pkPeriod(text) {
+  const all = pkFindDates(text).filter(d => !PK_DOB_CTX.test(text.slice(Math.max(0, d.idx - 40), d.idx)));
+  const anch = new Set(all.filter(d => PK_COVER.test(text.slice(Math.max(0, d.idx - 150), d.idx))).map(d => d.value));
   const uniq = [];
   for (const d of all) if (!uniq.some(u => u.value === d.value)) uniq.push(d);
   uniq.sort((a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
-
   const pairs = [];
   for (let i = 0; i < uniq.length; i++) {
     for (let j = i + 1; j < uniq.length; j++) {
@@ -164,32 +207,34 @@ function pkDates(text) {
       if (days >= 340) pairs.push({ from: uniq[i], till: uniq[j], days });
     }
   }
-  if (pairs.length) {
-    const isA = p => (anch.has(p.from.value) || anch.has(p.till.value)) ? 1 : 0;
-    pairs.sort((p, q) => {
-      if (isA(p) !== isA(q)) return isA(q) - isA(p);
-      if (p.till.value !== q.till.value) return p.till.value < q.till.value ? 1 : -1;
-      return Math.abs(p.days - 364) - Math.abs(q.days - 364);
-    });
-    const b = pairs[0];
-    return [
-      { targets: ['issue'], value: b.from.value, snippet: pkSnip(text, b.from.idx, b.from.idx + 10), note: 'Policy start' },
-      { targets: ['expiry'], value: b.till.value, snippet: pkSnip(text, b.till.idx, b.till.idx + 10), note: 'Policy end' }
+  if (!pairs.length) return null;
+  const score = p => (anch.has(p.from.value) || anch.has(p.till.value) ? 1 : 0);
+  pairs.sort((p, q) =>
+    (score(q) - score(p)) ||
+    (p.till.value < q.till.value ? 1 : p.till.value > q.till.value ? -1 : 0) ||
+    (Math.abs(p.days - 364) - Math.abs(q.days - 364)));
+  return pairs[0];
+}
+function pkDatesFor(id, text) {
+  if (id === 'aadhaar' || id === 'pan') return [];
+  if (['car', 'life', 'health', 'insgen'].includes(id)) {
+    const per = pkPeriod(text);
+    if (per) return [
+      { targets: ['issue'], value: per.from.value, snippet: pkSnip(text, per.from.idx, per.from.idx + 10), note: 'Policy start' },
+      { targets: ['expiry'], value: per.till.value, snippet: pkSnip(text, per.till.idx, per.till.idx + 10), note: 'Policy end' }
     ];
+    return pkLabelled(text, /valid\s*from|issue[ds]?\b|issue\s+date/i, /valid\s*(till|to|upto|until)|expir|expires/i, true);
   }
-
-  // No clear pair: use nearby words, or offer both choices
-  const out = [];
-  for (const d of uniq.slice(0, 4)) {
-    const before = text.slice(Math.max(0, d.idx - 30), d.idx).toLowerCase();
-    const sn = pkSnip(text, d.idx, d.idx + d.len);
-    if (/expir|renew|due date|valid\s*(upto|until|till)/.test(before)) out.push({ targets: ['expiry'], value: d.value, snippet: sn, note: '' });
-    else if (/issu|dated|granted/.test(before)) out.push({ targets: ['issue'], value: d.value, snippet: sn, note: '' });
-    else out.push({ targets: ['issue', 'expiry'], value: d.value, snippet: sn, note: 'Check which date this is' });
-  }
-  return out;
+  const rules = {
+    dl: [/\bdoi\b|date\s+of\s+issue|issue\s+date/i, /valid\s*(till|til|upto|up\s*to|until)/i, false],
+    passport: [/date\s+of\s+issue|issue\s+date/i, /date\s+of\s+expiry|expiry\s+date/i, false],
+    rc: [/date\s+of\s+registration|registration\s+date/i, null, false]
+  };
+  if (rules[id]) return pkLabelled(text, rules[id][0], rules[id][1], rules[id][2]);
+  return pkLabelled(text, /issued|issue\s+date|dated|granted/i, /expir|renew|valid\s*(upto|until|till)|due\s+date/i, true);
 }
 
+/* ---------- finding other details ---------- */
 function pkVehicleFromSquashed(s) {
   const bh = s.match(/^(\d{2})BH([0-9OILSB]{4})([A-Z]{1,2})(?![A-Z])/);
   if (bh) return `${bh[1]}BH${pkDigits(bh[2])}${bh[3]}`;
@@ -199,25 +244,22 @@ function pkVehicleFromSquashed(s) {
   if (!PK_STATES.has(st)) return null;
   return st + pkDigits(m[2]).padStart(2, '0') + m[3] + pkDigits(m[4]);
 }
-
-// Vehicle number: first the one after a registration label, then anywhere in the text
+// Vehicle number: after a registration label first, then anywhere. Spaces, dots and hyphens are ignored.
 function pkVehicle(text) {
   const up = text.toUpperCase();
-  const lab = /(REGISTRATION|REGN|REG)\.?\s*(NO|NUMBER|MARK|NUM)?\.?\s*[:\-#]?\s*/g;
-  for (const m of up.matchAll(lab)) {
+  for (const m of up.matchAll(/\b(REGISTRATION|REGN|REG)\b\.?\s*(NO|NUMBER|MARK|NUM)?\.?\s*[:\-#]?\s*/g)) {
     const start = m.index + m[0].length;
-    const win = up.slice(start, start + 40).replace(/[^A-Z0-9]/g, '');
-    const v = pkVehicleFromSquashed(win);
+    const v = pkVehicleFromSquashed(up.slice(start, start + 40).replace(/[^A-Z0-9]/g, ''));
     if (v) return { value: v, idx: m.index, label: true };
   }
   const sq = up.replace(/[^A-Z0-9]/g, '');
   for (let i = 0; i + 10 <= sq.length; i++) {
     const v = pkVehicleFromSquashed(sq.slice(i, i + 20));
-    if (v) return { value: v, idx: -1, label: false };
+    if (v) return { value: v, idx: i, label: false };
   }
   return null;
 }
-
+// Policy number, keeping spaces (e.g. "0157681764 09 00")
 function pkPolicyNo(text) {
   const m = /policy\s*(?:no|number|num)\.?\s*[:\-#]?\s*/i.exec(text);
   if (!m) return null;
@@ -230,18 +272,31 @@ function pkPolicyNo(text) {
   }
   return toks.length ? { value: toks.join(' '), idx: m.index } : null;
 }
-
-function pkName(text) {
+// Driving licence number, e.g. "MH13 20090023095" becomes "MH1320090023095"
+function pkDlNumber(text) {
+  const m = /(?:dl|licen[cs]e|lic)\s*(?:no|number|num)\.?\s*[:\-#]?\s*/i.exec(text);
+  if (!m) return null;
+  const sq = text.slice(m.index + m[0].length, m.index + m[0].length + 30).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const g = /^([A-Z0-9]{2})([0-9OIL]{2})([0-9OILSB]{7,13})/.exec(sq);
+  if (!g) return null;
+  const st = pkLetters(g[1]);
+  if (!PK_STATES.has(st)) return null;
+  return { value: st + pkDigits(g[2]) + pkDigits(g[3]), idx: m.index };
+}
+// Person name after "Name", "Insured Name", "certify that" and similar labels
+function pkNameFrom(text) {
   const re = /(policy\s*holder'?s?\s*name|insured\s*name|name\s+of\s+(?:the\s+)?(?:holder|insured|candidate|student|employee|person|nominee)|full\s+name|certify\s+that|issued\s+to|\bname)\s*[:\-]?\s*/gi;
   for (const m of text.matchAll(re)) {
+    let chunk = text.slice(m.index + m[0].length, m.index + m[0].length + 90);
+    const stop = PK_STOP.exec(chunk);
+    if (stop) chunk = chunk.slice(0, stop.index);
     const words = [];
-    const chunk = text.slice(m.index + m[0].length, m.index + m[0].length + 120);
     for (const raw of chunk.split(/\s+/)) {
-      const w = raw.replace(/[^A-Za-z.'-]/g, '');
-      if (!w) continue;
-      if (!words.length && /^(mr|mrs|ms|miss|dr|shri|smt|kum)\.?$/i.test(w)) continue;
-      if (PK_NAME_BLOCK.test(w)) break;
-      words.push(w);
+      const core = raw.replace(/[^A-Za-z]/g, '');
+      if (!core) continue;
+      if (!words.length && /^(mr|mrs|ms|miss|dr|shri|smt|kum)$/i.test(core)) continue;
+      if (core.length < 2 || PK_NAME_BLOCK.test(core) || !/^[A-Za-z.'\-]+$/.test(raw)) break;
+      words.push(core);
       if (words.length === 4) break;
     }
     if (words.length >= 2) {
@@ -251,18 +306,19 @@ function pkName(text) {
   return null;
 }
 
-function pkKind(text) {
+/* ---------- document type ---------- */
+function pkDetect(text) {
   let best = null;
-  for (const k of PK_KINDS) {
-    if (k.generic) continue;
-    const n = (text.match(new RegExp(k.re.source, 'gi')) || []).length;
-    if (n && (!best || n > best.n)) best = { k, n };
+  for (const p of PK_PROFILES) {
+    if (p.weak) continue;
+    const n = (text.match(new RegExp(p.re.source, 'gi')) || []).length;
+    if (n && (!best || n > best.n)) best = { p, n };
   }
-  if (best) return best.k;
-  return PK_KINDS.find(k => k.generic && k.re.test(text)) || null;
+  if (best) return best.p;
+  return PK_PROFILES.find(p => p.weak && p.re.test(text)) || null;
 }
 
-// Overrides app.js: builds the review suggestions
+/* ---------- building suggestions ---------- */
 function pkBuild(text) {
   const out = [];
   const add = (targets, value, snippet, note) => {
@@ -271,142 +327,48 @@ function pkBuild(text) {
     out.push({ targets, value, snippet: snippet || '', note: note || '' });
   };
 
-  const kind = pkKind(text);
+  const prof = pkDetect(text);
+  PK_LAST = prof ? prof.kind : null;
+  const id = prof ? prof.id : 'other';
+  const kind = prof ? prof.kind : 'Document';
+  const kindSn = prof ? pkRegexSnip(text, prof.re) : '';
+  const name = pkNameFrom(text);
   const veh = pkVehicle(text);
-  const name = pkName(text);
   const pol = pkPolicyNo(text);
 
-  if (kind) {
-    const km = new RegExp(kind.re.source, 'i').exec(text);
-    const kindSn = km ? pkSnip(text, km.index, km.index + km[0].length) : '';
-    let title = kind.kind;
-    let tSn = kindSn;
-    let tNote = '';
-    if (kind.vehicle) {
-      if (veh) {
-        title += ' - ' + veh.value;
-        if (veh.idx >= 0) tSn = pkSnip(text, veh.idx, veh.idx + 12);
-        tNote = veh.label ? 'Vehicle no.' : 'Vehicle no. (check it)';
-      } else {
-        tNote = 'Vehicle no. not found, add it in Title';
-      }
-    } else if (kind.person && name) {
-      title += ' - ' + name.value;
-      tSn = pkSnip(text, name.idx, name.idx + 30);
-      tNote = 'Name';
-    }
-    add(['title'], title, tSn, tNote);
-    add(['type'], kind.type, kindSn, 'Document type');
+  // Title and type
+  let subject = null, subSn = '', subNote = '';
+  if (prof && prof.vehicle) {
+    if (veh) { subject = veh.value; subSn = pkSnip(text, veh.idx, veh.idx + 12); subNote = 'Vehicle no.'; }
+    else subNote = 'Vehicle no. not found, add it in Title';
+  } else if (prof && prof.person) {
+    if (name) { subject = name.value; subSn = pkSnip(text, name.idx, name.idx + 30); subNote = 'Name'; }
+    else subNote = 'Name not found, add it in Title';
   }
+  add(['title'], subject ? kind + ' - ' + subject : kind, subject ? subSn : kindSn, subNote);
+  if (prof) add(['type'], prof.type, kindSn, 'Document type');
 
-  if (pol) {
-    add(['number'], pol.value, pkSnip(text, pol.idx, pol.idx + 20), 'Policy no.');
-  } else if (kind && kind.vehicle && veh) {
-    add(['number'], veh.value, veh.idx >= 0 ? pkSnip(text, veh.idx, veh.idx + 12) : '', 'Vehicle no.');
-  }
+  // Number
+  let num = null, numLabel = 'Document no.';
+  if (id === 'dl') { num = pkDlNumber(text); numLabel = 'Licence no.'; }
+  else if (id === 'passport') {
+    const m = /passport\s*(?:no|number)\.?\s*[:\-]?\s*([A-Z][0-9]{7})\b/i.exec(text) || /\b([A-Z][0-9]{7})\b/.exec(text);
+    if (m) num = { value: m[1].toUpperCase(), idx: m.index };
+    numLabel = 'Passport no.';
+  } else if (id === 'aadhaar') {
+    const m = /\b(\d{4})\s?(\d{4})\s?(\d{4})\b/.exec(text);
+    if (m) num = { value: `${m[1]} ${m[2]} ${m[3]}`, idx: m.index };
+    numLabel = 'Aadhaar no.';
+  } else if (id === 'pan') {
+    const m = /\b([A-Z]{5}[0-9]{4}[A-Z])\b/.exec(text);
+    if (m) num = { value: m[1], idx: m.index };
+    numLabel = 'PAN';
+  } else if (id === 'rc') { num = veh; numLabel = 'Vehicle no.'; }
+  else if (prof && prof.vehicle) { num = pol || veh; numLabel = pol ? 'Policy no.' : 'Vehicle no.'; }
+  else { num = pol; numLabel = 'Policy no.'; }
+  if (num) add(['number'], num.value, pkSnip(text, num.idx, num.idx + 20), numLabel);
 
-  for (const d of pkDates(text)) add(d.targets, d.value, d.snippet, d.note);
+  // Dates
+  for (const d of pkDatesFor(id, text)) add(d.targets, d.value, d.snippet, d.note);
   return out;
-}
-function buildSuggestions(text) {
-  return pkBuild(text);
-}
-
-// Review panel. Shows the version tag so you can confirm this file is running.
-function renderReview(statusText) {
-  let box = $('review');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'review';
-    box.className = 'review';
-    $('ocr-status').after(box);
   }
-  box.innerHTML = '';
-
-  const head = document.createElement('p');
-  head.className = 'hint';
-  head.textContent = statusText + '  [' + PK_VERSION + ']';
-  box.appendChild(head);
-  if (!suggestions.length) return;
-
-  box.appendChild(pkBtn('Approve best suggestion for each field', () => {
-    const used = new Set();
-    const keep = [];
-    for (const s of suggestions) {
-      const t = s.targets[0];
-      if (s.targets.length === 1 && !used.has(t)) {
-        used.add(t);
-        $(PK_FIELD[t]).value = s.value;
-      } else {
-        keep.push(s);
-      }
-    }
-    suggestions = keep;
-    renderReview('Applied best suggestion for each field. Check the form, then tap Save.');
-  }));
-
-  suggestions.forEach((s, i) => {
-    const card = document.createElement('div');
-    card.className = 'sugg';
-
-    const strong = document.createElement('strong');
-    strong.textContent = s.targets.map(t => PK_LABEL[t]).join(' or ') + ': ' + s.value;
-    const small = document.createElement('small');
-    small.textContent = (s.note ? s.note + ' · ' : '') + 'Found in: "' + s.snippet + '"';
-    card.append(strong, small);
-
-    const row = document.createElement('div');
-    row.className = 'row';
-    const done = (msg, field) => {
-      if (field) $(PK_FIELD[field]).value = s.value;
-      suggestions.splice(i, 1);
-      renderReview(msg);
-    };
-
-    if (s.targets.length > 1) {
-      for (const t of s.targets) {
-        row.appendChild(pkBtn('Use as ' + PK_LABEL[t].toLowerCase(),
-          () => done('Applied. Check the form, then tap Save.', t)));
-      }
-    } else {
-      const t = s.targets[0];
-      row.appendChild(pkBtn('Approve', () => done('Approved. Check the form, then tap Save.', t)));
-      row.appendChild(pkBtn('Edit', () => {
-        $(PK_FIELD[t]).value = s.value;
-        suggestions.splice(i, 1);
-        renderReview('Filled in. Change it in the form, then tap Save.');
-        $(PK_FIELD[t]).focus();
-      }, true));
-    }
-    row.appendChild(pkBtn('Dismiss', () => done('Dismissed.', null), true));
-    card.appendChild(row);
-    box.appendChild(card);
-  });
-}
-
-/* ---------- self-test: runs the picker on a sample of your policy text ---------- */
-function pkSelfTest() {
-  const got = pkBuild(PK_SAMPLE);
-  const pick = t => got.find(s => s.targets.length === 1 && s.targets[0] === t);
-  const expect = {
-    title: 'Car insurance - WB06L2307',
-    type: 'Insurance',
-    number: '0157681764 09 00',
-    issue: '2026-10-30',
-    expiry: '2027-10-29'
-  };
-  const lines = Object.keys(expect).map(k => {
-    const s = pick(k);
-    const ok = !!s && s.value === expect[k];
-    return (ok ? 'PASS  ' : 'FAIL  ') + k + ': ' + (s ? s.value : 'nothing found') +
-      (ok ? '' : '  (expected ' + expect[k] + ')');
-  });
-  alert(PK_VERSION + ' self-test\n\n' + lines.join('\n'));
-}
-(function pkAddSelfTestButton() {
-  const bk = document.querySelector('.backup');
-  if (!bk || document.getElementById('pk-selftest')) return;
-  const b = pkBtn('Run picker self-test', pkSelfTest, true);
-  b.id = 'pk-selftest';
-  bk.appendChild(b);
-})();
