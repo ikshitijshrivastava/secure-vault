@@ -791,3 +791,118 @@ document.addEventListener('visibilitychange', () => {
   const cfg = await dbGet('meta', 'config');
   show(cfg ? 'view-unlock' : 'view-setup');
 })();
+/* ================= Smart document recognition (replaces older buildSuggestions) ================= */
+
+// Document kinds, most specific first. The first match wins.
+const DOC_RULES = [
+  { re: /life\s+(insurance|assurance|cover)|term\s+(plan|insurance)|endowment|sum\s+assured/i,
+    kind: 'Life insurance', type: 'Insurance', person: true },
+  { re: /health\s+insurance|mediclaim|medical\s+insurance|health\s+card/i,
+    kind: 'Health insurance', type: 'Insurance', person: true },
+  { re: /motor\s+(insurance|policy)|car\s+insurance|vehicle\s+insurance|two[\s-]?wheeler\s+insurance|own\s+damage|third[\s-]?party/i,
+    kind: 'Car insurance', type: 'Insurance', vehicle: true },
+  { re: /travel\s+insurance/i, kind: 'Travel insurance', type: 'Insurance', person: true },
+  { re: /home\s+insurance|property\s+insurance/i, kind: 'Home insurance', type: 'Insurance' },
+  { re: /insurance|policy\s*(holder|no|number)|premium/i,
+    kind: 'Insurance policy', type: 'Insurance', person: true },
+  { re: /registration\s+certificate|certificate\s+of\s+registration|registering\s+authority|chassis/i,
+    kind: 'Vehicle registration (RC)', type: 'Vehicle', vehicle: true },
+  { re: /driving\s+licen[cs]e|driver'?s?\s+licen[cs]e/i,
+    kind: 'Driving licence', type: 'Identity', person: true },
+  { re: /\bpassport\b/i, kind: 'Passport', type: 'Identity', person: true },
+  { re: /aadhaar|aadhar|national identity|identity card|\bid card\b|\bpan\s+card|permanent account number/i,
+    kind: 'ID card', type: 'Identity', person: true },
+  { re: /certif(icate|y)|this is to certify|certify that/i,
+    kind: 'Certificate', type: 'Certificate', person: true },
+  { re: /sale\s+deed|property|land\s+record|\bland\b/i, kind: 'Property document', type: 'Property' },
+  { re: /bank\s+statement|statement\s+of\s+account|\btax\b|\binvoice\b/i,
+    kind: 'Financial document', type: 'Financial' }
+];
+
+// Words that are never part of a person's name
+const NAME_STOP = /^(of|the|and|name|policy|number|no|date|address|holder|insured|son|daughter|wife|dob|sex|male|female|issue|valid|expiry|nominee|premium|mobile|email|phone|insurance|company|limited|ltd|bank|plan|certificate|s\/o|d\/o|w\/o)$/i;
+
+// Finds a person's name after common labels such as "Name:", "Insured:" or "certify that"
+function extractPersonName(text) {
+  const labels = /(?:policy\s*holder'?s?\s*name|holder'?s?\s*name|insured\s*name|insured|name\s+of\s+(?:the\s+)?(?:holder|insured|candidate|student|employee|person)|full\s+name|this\s+is\s+to\s+certify\s+that|certify\s+that|issued\s+to|name)\s*[:\-]?\s*/gi;
+  for (const m of text.matchAll(labels)) {
+    const start = m.index + m[0].length;
+    const rest = text.slice(start, start + 80);
+    const words = [];
+    for (const w of rest.split(/\s+/)) {
+      const clean = w.replace(/[^A-Za-z.'-]/g, '');
+      if (!clean || !/^[A-Z]/.test(clean) || NAME_STOP.test(clean)) break;
+      words.push(clean);
+      if (words.length === 4) break;
+    }
+    if (words.length >= 2) return words.join(' ');
+  }
+  return null;
+}
+
+// Finds an Indian-style vehicle registration number, e.g. MH12AB1234
+function extractVehicleNo(text) {
+  const m = text.match(/\b[A-Z]{2}[\s-]?\d{1,2}[\s-]?[A-Z]{1,3}[\s-]?\d{4}\b/);
+  return m ? m[0].replace(/[\s-]/g, '').toUpperCase() : null;
+}
+
+// Finds a document number, preferring one labelled "Policy No" or similar
+function extractNumber(text) {
+  const labelled = /(policy|certificate|passport|licen[cs]e|registration|reg\.?|document|pan|cover\s*note|member)?\s*(?:no|number|nbr|#)\.?\s*[:\-#]?\s*([A-Z0-9][A-Z0-9\-\/]{4,24})\b/gi;
+  let best = null;
+  for (const m of text.matchAll(labelled)) {
+    if (!/\d/.test(m[2])) continue;
+    const prefix = (m[1] || '').toLowerCase();
+    const score = prefix.startsWith('policy') ? 3 : prefix ? 2 : 1;
+    if (!best || score > best.score) best = { value: m[2].toUpperCase(), score };
+  }
+  return best ? best.value : null;
+}
+
+// Builds suggestions: title, type, number, and dates for review
+function buildSuggestions(text) {
+  const out = [];
+  const seen = new Set();
+  const snip = (idx, len) =>
+    text.slice(Math.max(0, idx - 30), idx + len + 10).replace(/\s+/g, ' ').trim();
+  const add = (targets, value, snippet) => {
+    const k = targets.join() + '|' + value;
+    if (!value || seen.has(k) || out.length >= 12) return;
+    seen.add(k);
+    out.push({ targets, value, snippet });
+  };
+
+  const rule = DOC_RULES.find(r => r.re.test(text));
+  const person = extractPersonName(text);
+  const vehicle = extractVehicleNo(text);
+  const number = extractNumber(text);
+
+  if (rule) {
+    const m = text.match(rule.re);
+    const sn = snip(m.index, m[0].length);
+
+    // Subject: vehicle number for vehicle documents, person name for personal documents
+    let subject = null;
+    if (rule.vehicle && vehicle) subject = vehicle;
+    else if (rule.person && person) subject = person;
+
+    const title = subject ? `${rule.kind} - ${subject}` : rule.kind;
+    add(['title'], title, sn);
+    add(['type'], rule.type, sn);
+
+    // Number: policy/document number first; vehicle documents fall back to vehicle number
+    const num = number || (rule.vehicle ? vehicle : null);
+    if (num) add(['number'], num, sn);
+  }
+
+  // Dates: label decides expiry or issue; dates near "birth" or "DOB" are skipped
+  for (const d of findDates(text)) {
+    const before = text.slice(Math.max(0, d.idx - 30), d.idx).toLowerCase();
+    if (/birth|\bdob\b|d\.o\.b/.test(before)) continue;
+    const sn = snip(d.idx, d.len);
+    if (EXPIRY_HINT.test(before)) add(['expiry'], d.value, sn);
+    else if (ISSUE_HINT.test(before)) add(['issue'], d.value, sn);
+    else add(['issue', 'expiry'], d.value, sn);
+  }
+  return out;
+                                                 }
