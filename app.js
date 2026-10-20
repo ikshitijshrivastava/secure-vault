@@ -1233,3 +1233,122 @@ function smartDates(text) {
   }
   return out.slice(0, 4);
   }
+/* ================= Smart picker v2 (part 2: suggestions and review) ================= */
+
+function buildSuggestions(text) {
+  const out = [];
+  const add = (targets, value, snippet, note) => {
+    if (!value || out.length >= 14) return;
+    if (out.some(s => s.value === value && s.targets.join() === targets.join())) return;
+    out.push({ targets, value, snippet, note: note || '' });
+  };
+  const near = (idx, len) =>
+    text.slice(Math.max(0, idx - 30), idx + len + 20).replace(/\s+/g, ' ').trim().slice(0, 110);
+  const at = v => {
+    const i = text.toLowerCase().indexOf(v.toLowerCase());
+    return i >= 0 ? near(i, v.length) : '';
+  };
+
+  const kind = pickKind(text);
+  const vehicles = vehicleCandidates(text);
+  const person = findPersonName(text);
+  const policyNo = findNumber(text);
+
+  if (kind) {
+    const km = text.match(new RegExp(kind.re.source, 'i'));
+    const kindSn = km ? near(km.index, km[0].length) : '';
+
+    if (kind.vehicle && vehicles.length) {
+      add(['title'], `${kind.kind} - ${vehicles[0].value}`, near(vehicles[0].idx, 12), 'Vehicle no.');
+      for (const v of vehicles.slice(1, 3)) {
+        add(['title'], `${kind.kind} - ${v.value}`, near(v.idx, 12), 'Other vehicle no. (check which is correct)');
+      }
+    } else if (kind.person && person) {
+      add(['title'], `${kind.kind} - ${person}`, at(person), 'Name');
+    } else {
+      add(['title'], kind.kind, kindSn, '');
+    }
+    add(['type'], kind.type, kindSn, 'Document type');
+  }
+
+  const num = policyNo || (kind && kind.vehicle && vehicles[0] ? vehicles[0].value : null);
+  if (num) {
+    const snip = policyNo ? at(num) : near(vehicles[0].idx, 12);
+    add(['number'], num, snip, policyNo ? 'Policy no.' : 'Vehicle no.');
+  }
+
+  for (const d of smartDates(text)) add(d.targets, d.value, d.snippet, d.note);
+  return out;
+}
+
+// Review panel. "Approve best suggestion for each field" applies only the first suggestion per field.
+function renderReview(statusText) {
+  let box = $('review');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'review';
+    box.className = 'review';
+    $('ocr-status').after(box);
+  }
+  box.innerHTML = '';
+
+  const head = document.createElement('p');
+  head.className = 'hint';
+  head.textContent = statusText;
+  box.appendChild(head);
+  if (!suggestions.length) return;
+
+  box.appendChild(makeButton('Approve best suggestion for each field', () => {
+    const used = new Set();
+    const keep = [];
+    for (const s of suggestions) {
+      const t = s.targets[0];
+      if (s.targets.length === 1 && !used.has(t)) {
+        used.add(t);
+        applyValue(t, s.value);
+      } else {
+        keep.push(s);
+      }
+    }
+    suggestions = keep;
+    renderReview('Applied the best suggestion for each field. Check the form, then tap Save.');
+  }));
+
+  suggestions.forEach((s, i) => {
+    const card = document.createElement('div');
+    card.className = 'sugg';
+
+    const strong = document.createElement('strong');
+    strong.textContent = s.targets.map(t => FIELD_LABELS[t]).join(' or ') + ': ' + s.value;
+    const src = document.createElement('small');
+    src.textContent = (s.note ? s.note + ' · ' : '') + 'Found in: "' + s.snippet + '"';
+    card.append(strong, src);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    const finish = (msg, field) => {
+      if (field) applyValue(field, s.value);
+      suggestions.splice(i, 1);
+      renderReview(msg);
+    };
+
+    if (s.targets.length > 1) {
+      for (const t of s.targets) {
+        row.appendChild(makeButton('Use as ' + FIELD_LABELS[t].toLowerCase(), () =>
+          finish('Applied. Check the form, then tap Save.', t)));
+      }
+    } else {
+      const t = s.targets[0];
+      row.appendChild(makeButton('Approve', () => finish('Approved. Check the form, then tap Save.', t)));
+      row.appendChild(makeButton('Edit', () => {
+        applyValue(t, s.value);
+        suggestions.splice(i, 1);
+        renderReview('Filled in. Change it in the form, then tap Save.');
+        $(FIELD_IDS[t]).focus();
+      }, true));
+    }
+    row.appendChild(makeButton('Dismiss', () => finish('Dismissed.', null), true));
+    card.appendChild(row);
+    box.appendChild(card);
+  });
+      }
