@@ -940,3 +940,113 @@ function extractVehicleNo(text) {
   }
   return null;
                    }
+/* ================= Vehicle number and date pairing (replaces older versions) ================= */
+
+// Labels that usually sit just before a vehicle number
+const VEH_LABEL_RE = /(registration\s*(no|number|num|mark)?|reg\.?\s*(no|number)?|regn\.?\s*(no)?|vehicle\s*(no|number|reg)?|veh\.?\s*(no)?)/gi;
+
+// Reads a vehicle number from a chunk of text, ignoring spaces, hyphens and dots
+function vehicleFromChunk(chunk, strictState) {
+  const clean = chunk.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  // Bharat (BH) series, e.g. 22BH1234AA
+  const bh = clean.match(/(\d{2})BH([0-9OILSB]{4})([A-Z]{1,2})/);
+  if (bh) return `${bh[1]}BH${fixAsDigits(bh[2])}${bh[3]}`;
+
+  // Standard format: state, district, series letters, 4-digit number
+  const re = /(?=([A-Z0-9]{2})([0-9OILSB]{1,2})([A-Z]{1,3})([0-9OILSB]{4}))/g;
+  for (const m of clean.matchAll(re)) {
+    const state = fixAsLetters(m[1]);
+    if (strictState && !INDIAN_STATE_CODES.has(state)) continue;
+    return `${state}${fixAsDigits(m[2]).padStart(2, '0')}${m[3]}${fixAsDigits(m[4])}`;
+  }
+  return null;
+}
+
+// Order: 1) text just after a label, 2) anywhere in the text, 3) after a label without state check
+function extractVehicleNo(text) {
+  for (const m of text.matchAll(VEH_LABEL_RE)) {
+    const start = m.index + m[0].length;
+    const v = vehicleFromChunk(text.slice(start, start + 60), true);
+    if (v) return v;
+  }
+  const anywhere = vehicleFromChunk(text, true);
+  if (anywhere) return anywhere;
+  for (const m of text.matchAll(VEH_LABEL_RE)) {
+    const start = m.index + m[0].length;
+    const v = vehicleFromChunk(text.slice(start, start + 60), false);
+    if (v) return v;
+  }
+  return null;
+}
+
+// Dates: two dates = earlier is issue, later is expiry. Otherwise use nearby labels.
+function buildDates(text) {
+  const out = [];
+  const snipAt = d => text.slice(Math.max(0, d.idx - 30), d.idx + d.len + 10).replace(/\s+/g, ' ').trim();
+  const notBirth = d => !/birth|\bdob\b|d\.o\.b/.test(text.slice(Math.max(0, d.idx - 30), d.idx).toLowerCase());
+
+  const uniq = [];
+  for (const d of findDates(text).filter(notBirth)) {
+    if (!uniq.some(u => u.value === d.value)) uniq.push(d);
+  }
+
+  if (uniq.length === 2) {
+    const [a, b] = [...uniq].sort((x, y) => x.value.localeCompare(y.value));
+    out.push({ targets: ['issue'], value: a.value, snippet: snipAt(a) });
+    out.push({ targets: ['expiry'], value: b.value, snippet: snipAt(b) });
+    return out;
+  }
+
+  for (const d of uniq) {
+    const before = text.slice(Math.max(0, d.idx - 30), d.idx);
+    if (EXPIRY_HINT.test(before)) out.push({ targets: ['expiry'], value: d.value, snippet: snipAt(d) });
+    else if (ISSUE_HINT.test(before)) out.push({ targets: ['issue'], value: d.value, snippet: snipAt(d) });
+    else out.push({ targets: ['issue', 'expiry'], value: d.value, snippet: snipAt(d) });
+  }
+  return out;
+}
+
+// Builds suggestions for the review panel
+function buildSuggestions(text) {
+  const out = [];
+  const seen = new Set();
+  const snip = (idx, len) =>
+    text.slice(Math.max(0, idx - 30), idx + len + 10).replace(/\s+/g, ' ').trim();
+  const add = (targets, value, snippet) => {
+    const k = targets.join() + '|' + value;
+    if (!value || seen.has(k) || out.length >= 12) return;
+    seen.add(k);
+    out.push({ targets, value, snippet });
+  };
+
+  const rule = DOC_RULES.find(r => r.re.test(text));
+  const person = extractPersonName(text);
+  const vehicle = extractVehicleNo(text);
+  const number = extractNumber(text);
+
+  if (rule) {
+    const m = text.match(rule.re);
+    const sn = snip(m.index, m[0].length);
+
+    let subject = null;
+    if (rule.vehicle && vehicle) subject = vehicle;
+    else if (rule.person && person) subject = person;
+
+    // If no vehicle number was read, show the text near the vehicle/registration words so you can see why
+    let titleSnippet = sn;
+    if (rule.vehicle && !vehicle) {
+      const vi = text.search(/vehicle|registration|reg\.?\s*no|regn/i);
+      titleSnippet = vi >= 0 ? snip(vi, 40) : 'No vehicle number found in the photo. Add it in the Title field.';
+    }
+
+    add(['title'], subject ? `${rule.kind} - ${subject}` : rule.kind, titleSnippet);
+    add(['type'], rule.type, sn);
+
+    const num = number || (rule.vehicle ? vehicle : null);
+    if (num) add(['number'], num, sn);
+  }
+
+  for (const d of buildDates(text)) add(d.targets, d.value, d.snippet);
+  return out;
+                                 }
