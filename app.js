@@ -433,3 +433,361 @@ function renderReview(statusText) {
     box.appendChild(card);
   });
   }
+/* ================= Lists and details ================= */
+function renderList() {
+  const q = $('search').value.trim().toLowerCase();
+  const ul = $('doc-list');
+  ul.innerHTML = '';
+
+  const items = docs.filter(d =>
+    !q || [d.title, d.type, d.number, d.notes].join(' ').toLowerCase().includes(q));
+  $('empty-msg').classList.toggle('hidden', docs.length > 0);
+
+  for (const d of items) {
+    const s = statusOf(daysLeft(d.expiry));
+    const li = document.createElement('li');
+    li.className = 'card ' + s.cls;
+    const strong = document.createElement('strong');
+    strong.textContent = d.title;
+    const small = document.createElement('small');
+    small.textContent = d.type + (d.number ? ' · ' + d.number : '');
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = s.label;
+    li.append(strong, small, badge);
+    li.onclick = () => showDetail(d.id);
+    ul.appendChild(li);
+  }
+  renderAlerts();
+}
+function renderAlerts() {
+  const due = docs.filter(d => {
+    const n = daysLeft(d.expiry);
+    return n !== null && n <= WARN_DAYS;
+  });
+  $('alerts').innerHTML = '';
+  if (due.length) {
+    const p = document.createElement('div');
+    p.className = 'alert';
+    p.textContent = `${due.length} document(s) expired or expiring within ${WARN_DAYS} days.`;
+    $('alerts').appendChild(p);
+  }
+}
+function showDetail(id) {
+  currentId = id;
+  const d = docs.find(x => x.id === id);
+  if (!d) return;
+  const s = statusOf(daysLeft(d.expiry));
+  const rows = [
+    ['Title', d.title], ['Type', d.type], ['Document number', d.number],
+    ['Issue date', d.issue], ['Expiry date', d.expiry], ['Status', s.label],
+    ['Notes', d.notes], ['File', d.fileName]
+  ];
+  const box = $('detail');
+  box.innerHTML = '';
+  const h = document.createElement('h2');
+  h.textContent = d.title;
+  box.appendChild(h);
+  const dl = document.createElement('dl');
+  for (const [k, v] of rows) {
+    if (!v) continue;
+    const dt = document.createElement('dt');
+    dt.textContent = k;
+    const dd = document.createElement('dd');
+    dd.textContent = v;
+    dl.append(dt, dd);
+  }
+  box.appendChild(dl);
+  $('btn-download').classList.toggle('hidden', !d.fileId);
+  show('view-detail');
+}
+
+/* ================= Add / edit form ================= */
+function openForm(doc) {
+  currentId = doc ? doc.id : null;
+  pendingFile = null;
+  extractRun++;
+  clearReview();
+  $('edit-title').textContent = doc ? 'Edit document' : 'Add document';
+  $('f-title').value = doc?.title || '';
+  $('f-type').value = doc?.type || 'Other';
+  $('f-number').value = doc?.number || '';
+  $('f-issue').value = doc?.issue || '';
+  $('f-expiry').value = doc?.expiry || '';
+  $('f-notes').value = doc?.notes || '';
+  $('f-file').value = '';
+  $('ocr-status').textContent = doc?.fileName ? `Current file: ${doc.fileName}` : '';
+  show('view-edit');
+}
+
+// Auto-read the chosen file and show suggestions for review
+$('f-file').addEventListener('change', async e => {
+  pendingFile = e.target.files[0] || null;
+  const run = ++extractRun;
+  clearReview();
+  if (!pendingFile) return;
+
+  renderReview('Reading document on this device...');
+  try {
+    const result = await readDocument(pendingFile);
+    if (run !== extractRun) return;           // a newer file was chosen
+    if (result.error) {
+      renderReview(result.error + ' Enter details manually.');
+      return;
+    }
+    suggestions = buildSuggestions(result.text);
+    renderReview(suggestions.length
+      ? `Found ${suggestions.length} suggestion(s). Approve, edit or dismiss each one. Nothing is saved until you tap Save.`
+      : 'No details found. Enter them manually.');
+  } catch (err) {
+    if (run === extractRun) {
+      renderReview('Could not read this document. Enter details manually. (' + err.message + ')');
+    }
+  }
+});
+
+$('form-doc').addEventListener('submit', async e => {
+  e.preventDefault();
+  try {
+    const old = docs.find(d => d.id === currentId);
+    const meta = {
+      id: currentId || newId(),
+      title: $('f-title').value.trim(),
+      type: $('f-type').value,
+      number: $('f-number').value.trim(),
+      issue: $('f-issue').value,
+      expiry: $('f-expiry').value,
+      notes: $('f-notes').value.trim(),
+      fileId: old?.fileId || null,
+      fileName: old?.fileName || null,
+      fileType: old?.fileType || null,
+      createdAt: old?.createdAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    if (pendingFile) {
+      const bytes = new Uint8Array(await pendingFile.arrayBuffer());
+      const newFileId = newId();
+      await saveFile(newFileId, bytes);                       // write new file first
+      if (old?.fileId) await dbDel('files', old.fileId);      // then remove old
+      meta.fileId = newFileId;
+      meta.fileName = pendingFile.name;
+      meta.fileType = pendingFile.type;
+    }
+    await saveMeta(meta);
+    currentId = null;
+    pendingFile = null;
+    extractRun++;
+    clearReview();
+    await loadDocs();
+    renderList();
+    show('view-list');
+  } catch (err) {
+    alert('Could not save: ' + err.message);
+  }
+});
+
+$('btn-cancel').onclick = () => {
+  pendingFile = null;
+  extractRun++;
+  clearReview();
+  show('view-list');
+};
+
+/* ================= Detail actions ================= */
+$('btn-back').onclick = () => show('view-list');
+$('btn-edit').onclick = () => openForm(docs.find(d => d.id === currentId));
+
+$('btn-download').onclick = async () => {
+  const d = docs.find(x => x.id === currentId);
+  const bytes = d?.fileId ? await readFile(d.fileId) : null;
+  if (!bytes) return alert('No file found for this document.');
+  const url = URL.createObjectURL(new Blob([bytes], { type: d.fileType || 'application/octet-stream' }));
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+};
+
+$('btn-delete').onclick = async () => {
+  if (!confirm('Delete this document permanently?')) return;
+  try {
+    const d = docs.find(x => x.id === currentId);
+    if (d?.fileId) await dbDel('files', d.fileId);
+    await dbDel('docs', currentId);
+    await loadDocs();
+    renderList();
+    show('view-list');
+  } catch (err) { alert('Delete failed: ' + err.message); }
+};
+
+$('search').addEventListener('input', renderList);
+$('btn-add').onclick = () => openForm(null);
+
+/* ================= Export and import ================= */
+function download(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+$('btn-export').onclick = async () => {
+  try {
+    const cfg = await dbGet('meta', 'config');
+    const docRows = await dbAll('docs');
+    const fileRows = await dbAll('files');
+    const payload = {
+      format: 'secure-vault',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      salt: toB64(cfg.salt),
+      verifier: { iv: toB64(cfg.iv), data: toB64(cfg.data) },
+      docs: docRows.map(r => ({ id: r.id, iv: toB64(r.iv), data: toB64(r.data) })),
+      files: fileRows.map(r => ({ id: r.id, iv: toB64(r.iv), data: toB64(r.data) }))
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    download(blob, `vault-${new Date().toISOString().slice(0, 10)}.vault`);
+  } catch (err) { alert('Export failed: ' + err.message); }
+};
+
+$('import-file').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const p = JSON.parse(await file.text());
+    if (p.format !== 'secure-vault' || !p.salt) throw new Error('Not a valid vault file.');
+
+    const pass = prompt('Enter the master password used when this vault was exported:');
+    if (!pass) return;
+
+    const oldKey = await deriveKey(pass, fromB64(p.salt));
+    let ok = false;
+    try {
+      ok = dec.decode(await decrypt(oldKey, fromB64(p.verifier.iv), fromB64(p.verifier.data))) === 'VAULT-OK';
+    } catch { ok = false; }
+    if (!ok) throw new Error('Wrong password for this file.');
+
+    for (const f of p.files) {
+      await saveFile(f.id, await decrypt(oldKey, fromB64(f.iv), fromB64(f.data)));
+    }
+    let count = 0;
+    for (const d of p.docs) {
+      const meta = JSON.parse(dec.decode(await decrypt(oldKey, fromB64(d.iv), fromB64(d.data))));
+      await saveMeta(meta);
+      count++;
+    }
+    await loadDocs();
+    renderList();
+    alert(`Imported ${count} document(s). Existing items with the same ID were replaced.`);
+  } catch (err) { alert('Import failed: ' + err.message); }
+});
+
+/* ================= Notifications ================= */
+$('btn-notify').onclick = async () => {
+  if (!('Notification' in window)) return alert('Notifications are not supported here.');
+  const r = await Notification.requestPermission();
+  alert(r === 'granted'
+    ? 'Enabled. Renewal alerts appear when the app is opened.'
+    : 'Notifications were not allowed.');
+};
+
+async function notifyDue() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const due = docs.filter(d => {
+    const n = daysLeft(d.expiry);
+    return n !== null && n <= WARN_DAYS;
+  });
+  if (!due.length) return;
+  const body = due.slice(0, 3).map(d => d.title).join(', ') + (due.length > 3 ? ' and more' : '');
+  const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+  if (reg) reg.showNotification('Documents need renewal', { body, tag: 'renewal' });
+  else new Notification('Documents need renewal', { body });
+}
+
+/* ================= Wipe ================= */
+$('btn-wipe').onclick = async () => {
+  if (!confirm('This permanently deletes ALL documents on this device.')) return;
+  if (prompt('Type DELETE to confirm:') !== 'DELETE') return;
+  try {
+    for (const s of ['meta', 'docs', 'files']) await dbClear(s);
+    key = null;
+    alert('All data deleted.');
+    location.reload();
+  } catch (err) { alert('Wipe failed: ' + err.message); }
+};
+
+/* ================= Session flow ================= */
+function enterApp() {
+  setTop(true);
+  renderList();
+  show('view-list');
+  notifyDue();
+}
+function lockVault() {
+  key = null;
+  docs = [];
+  currentId = null;
+  pendingFile = null;
+  extractRun++;
+  clearReview();
+  $('unlock-pass').value = '';
+  setTop(false);
+  show('view-unlock');
+}
+
+$('btn-lock').onclick = lockVault;
+
+$('form-setup').addEventListener('submit', async e => {
+  e.preventDefault();
+  const a = $('setup-pass').value;
+  const b = $('setup-pass2').value;
+  if (a !== b) return alert('Passwords do not match.');
+  if (a.length < 8) return alert('Use at least 8 characters.');
+  if (!confirm('If this password is lost, your data cannot be recovered. Continue?')) return;
+  try {
+    await createVault(a);
+    $('setup-pass').value = '';
+    $('setup-pass2').value = '';
+    lastActive = Date.now();
+    await loadDocs();
+    enterApp();
+  } catch (err) { alert('Setup failed: ' + err.message); }
+});
+
+$('form-unlock').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('unlock-error').classList.add('hidden');
+  try {
+    await unlockVault($('unlock-pass').value);
+    $('unlock-pass').value = '';
+    lastActive = Date.now();
+    await loadDocs();
+    enterApp();
+  } catch (err) {
+    $('unlock-error').textContent = err.message;
+    $('unlock-error').classList.remove('hidden');
+  }
+});
+
+// Auto-lock: inactivity, and long time in background
+['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
+  document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true }));
+setInterval(() => {
+  if (key && Date.now() - lastActive > AUTO_LOCK_MS) lockVault();
+}, 15000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (key && Date.now() - hiddenAt > HIDDEN_LOCK_MS) lockVault();
+});
+
+/* ================= Start ================= */
+(async function init() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+    if (navigator.onLine) { ensurePdfJs(); ensureOcr(); }   // pre-load readers while online
+  }
+  const cfg = await dbGet('meta', 'config');
+  show(cfg ? 'view-unlock' : 'view-setup');
+})();
