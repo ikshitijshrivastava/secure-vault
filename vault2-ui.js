@@ -702,3 +702,199 @@ function vuSelfTest() {
   }
   alert('Reader tests\n\n' + lines.join('\n'));
          }
+/* ===== vault2-ui.js FIX: add-document form that accepts pages one at a time or several at once. Append to the end. ===== */
+vuForm = async function (body, editId) {
+  const all = await vuLoadAll();
+  const cur = editId ? all.docs.find(d => d.id === editId) || null : null;
+  const items = [];          // one entry per page added in this form
+  let suggestions = [];
+
+  /* fields */
+  const title = vuEl('input', { value: cur ? cur.title || '' : '', placeholder: 'Title, e.g. Car insurance - WB06L2307' });
+  const kindVal = cur ? cur.kind || 'Other' : 'Other';
+  const kind = vuEl('select', {}, VU_KINDS.map(k => vuEl('option', { value: k.kind, text: k.kind })));
+  if (!VU_KINDS.some(k => k.kind === kindVal)) kind.append(vuEl('option', { value: kindVal, text: kindVal }));
+  kind.value = kindVal;
+  const type = vuEl('select', {}, VU_TYPES.map(t => vuEl('option', { value: t, text: t })));
+  type.value = cur ? cur.type || 'Other' : 'Other';
+  const number = vuEl('input', { value: cur ? cur.number || '' : '', placeholder: 'Document number' });
+  const issue = vuEl('input', { type: 'date', value: cur ? cur.issue || '' : '' });
+  const expiry = vuEl('input', { type: 'date', value: cur ? cur.expiry || '' : '' });
+  const notes = vuEl('textarea', { rows: 2 });
+  notes.value = cur ? cur.notes || '' : '';
+  const fieldEl = { title, type, number, issue, expiry };
+
+  /* owners */
+  const ownedNow = cur ? vuOwnersOf(cur) : [];
+  const owners = [];
+  const ownerBox = vuEl('div', { cls: 'review' });
+  const addOwner = (id, label) => {
+    const cb = vuEl('input', { type: 'checkbox' });
+    cb.checked = ownedNow.includes(id);
+    owners.push({ id, cb });
+    ownerBox.append(vuEl('label', {}, [cb, ' ' + label]));
+  };
+  all.people.forEach(p => addOwner(p.id, 'Person: ' + p.name));
+  all.vehicles.forEach(v => addOwner(v.id, 'Vehicle: ' + v.number));
+  if (!owners.length) ownerBox.append(vuEl('p', { cls: 'hint', text: 'Add a person or vehicle first in Profiles.' }));
+
+  /* renewal or group */
+  const renew = vuEl('select', {}, [
+    vuEl('option', { value: '', text: cur ? 'Keep current group' : 'Auto (same owner, type and number)' }),
+    ...all.docs.filter(d => !cur || d.id !== cur.id).map(d =>
+      vuEl('option', { value: d.id, text: 'Renewal of: ' + (d.title || d.kind) + ' (expiry ' + (d.expiry || '-') + ')' }))
+  ]);
+
+  /* pages: a hidden picker, opened by the + button. Each pick adds to the list. */
+  const picker = vuEl('input', { type: 'file', accept: 'image/*,application/pdf' });
+  picker.setAttribute('multiple', '');
+  picker.style.display = 'none';
+  const pageList = vuEl('ul', { style: VU_LIST });
+  const status = vuEl('p', { cls: 'hint' });
+  const sugBox = vuEl('div', {});
+
+  const setStatus = () => {
+    const ok = items.filter(i => !i.error).length;
+    const bad = items.length - ok;
+    status.textContent = !items.length
+      ? (cur ? 'Add more pages if needed.' : 'Add one page at a time, or select several in the picker.')
+      : ok + ' page(s) read' + (bad ? ', ' + bad + ' could not be read' : '') +
+        '. Approve, edit or dismiss the suggestions, then tap Save.';
+  };
+  const drawPages = () => {
+    pageList.innerHTML = '';
+    items.forEach((it, i) => {
+      pageList.append(vuEl('li', { cls: 'card none' }, [
+        vuEl('small', { text: 'New page ' + (i + 1) + ': ' + it.file.name + (it.error ? ' (' + it.error + ')' : '') }),
+        vuBtn('Remove', () => { items.splice(i, 1); drawPages(); rebuild(); }, true)
+      ]));
+    });
+  };
+
+  /* suggestions */
+  const applyField = (field, value) => {
+    if (field === 'title') {
+      title.value = value;
+      const k = vuKindFromTitle(value);
+      if (k) kind.value = k.kind;
+    } else if (fieldEl[field]) {
+      fieldEl[field].value = value;
+    }
+  };
+  const drawSuggestions = () => {
+    sugBox.innerHTML = '';
+    if (!suggestions.length) return;
+    sugBox.append(vuBtn('Approve best suggestion for each field', () => {
+      const used = new Set();
+      suggestions = suggestions.filter(s => {
+        const t = s.targets[0];
+        if (s.targets.length === 1 && !used.has(t)) { used.add(t); applyField(t, s.value); return false; }
+        return true;
+      });
+      drawSuggestions();
+    }));
+    suggestions.forEach((s, i) => {
+      const done = field => {
+        if (field) applyField(field, s.value);
+        suggestions.splice(i, 1);
+        drawSuggestions();
+      };
+      const btns = vuEl('div', { cls: 'row' });
+      if (s.targets.length > 1) {
+        s.targets.forEach(t => btns.append(vuBtn('Use as ' + VU_LBL[t].toLowerCase(), () => done(t))));
+      } else {
+        const t = s.targets[0];
+        btns.append(vuBtn('Approve', () => done(t)));
+        btns.append(vuBtn('Edit', () => {
+          applyField(t, s.value);
+          suggestions.splice(i, 1);
+          drawSuggestions();
+          fieldEl[t].focus();
+        }, true));
+      }
+      btns.append(vuBtn('Dismiss', () => done(null), true));
+      sugBox.append(vuEl('div', { cls: 'sugg' }, [
+        vuEl('strong', { text: s.targets.map(t => VU_LBL[t]).join(' or ') + ': ' + s.value }),
+        vuEl('small', { text: (s.note ? s.note + ' · ' : '') + 'Found in: "' + s.snippet + '"' }),
+        btns
+      ]));
+    });
+  };
+
+  // Rebuilds suggestions from all pages currently in the list
+  const rebuild = () => {
+    const text = items.map(i => i.text || '').join('\n');
+    suggestions = text.trim() ? buildSuggestions(text) : [];
+    if (text.trim()) {
+      const hits = new Set([...vuMatchPeople(text, all.people), ...vuMatchVehicles(text, all.vehicles)]);
+      owners.forEach(o => { if (hits.has(o.id)) o.cb.checked = true; });
+    }
+    setStatus();
+    drawSuggestions();
+  };
+
+  // Each picked file is read and added to the list; nothing is lost if the picker gives one file
+  picker.addEventListener('change', async () => {
+    const picked = Array.from(picker.files || []);
+    picker.value = '';
+    for (const f of picked) {
+      status.textContent = 'Reading ' + f.name + ' on this device...';
+      try {
+        const r = await readDocument(f);
+        items.push({ file: f, text: r.text || '', error: r.error || '' });
+      } catch (e) {
+        items.push({ file: f, text: '', error: 'could not read: ' + e.message });
+      }
+      drawPages();
+    }
+    rebuild();
+  });
+
+  const saveDoc = async () => {
+    const t = title.value.trim();
+    if (!t) return alert('Enter a title.');
+    const newFiles = items.filter(i => !i.error).map(i => i.file);
+    if (!cur && !newFiles.length) return alert('Add at least one photo or PDF.');
+    const ownerIds = owners.filter(o => o.cb.checked).map(o => o.id);
+    try {
+      const id = cur ? cur.id : newId();
+      const newPages = await vuStorePages(id, newFiles, cur ? (cur.pageIds || []).length : 0);
+      const pageIds = [...(cur ? cur.pageIds || [] : []), ...newPages];
+      let groupId;
+      if (renew.value) {
+        const target = all.docs.find(d => d.id === renew.value);
+        groupId = target ? target.groupId : vuGroupKey(ownerIds, kind.value, number.value, id);
+      } else if (cur) {
+        groupId = cur.groupId;
+      } else {
+        groupId = vuGroupKey(ownerIds, kind.value, number.value, id);
+      }
+      await v2Put('docs', {
+        id, owners: ownerIds, ownerId: ownerIds[0] || null,
+        kind: kind.value, type: type.value, title: t, number: number.value.trim(),
+        issue: issue.value, expiry: expiry.value, notes: notes.value.trim(),
+        pageIds, groupId, createdAt: cur ? cur.createdAt : Date.now(), updatedAt: Date.now()
+      });
+      vuGo('detail', groupId);
+    } catch (e) { alert('Save failed: ' + e.message); }
+  };
+
+  /* layout */
+  body.append(vuEl('h2', { text: cur ? 'Edit document' : 'Add document' }));
+  body.append(vuEl('form', { on: { submit: e => e.preventDefault() } }, [
+    vuField('Title', title), vuField('Kind', kind), vuField('Type', type),
+    vuField('Document number', number), vuField('Issue date', issue), vuField('Expiry date', expiry),
+    vuField('Notes', notes), vuField('Renewal or group', renew)
+  ]));
+  body.append(vuEl('p', { cls: 'hint', text: 'Owners: tick every family member or vehicle this document belongs to.' }), ownerBox);
+  body.append(vuEl('h2', { text: 'Pages' }));
+  if (cur) body.append(vuEl('p', { cls: 'hint', text: (cur.pageIds || []).length + ' page(s) already stored.' }));
+  body.append(vuEl('div', { cls: 'row' }, [vuBtn('+ Add photo or PDF', () => picker.click())]));
+  body.append(picker, pageList, status, sugBox);
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Save document', saveDoc),
+    vuBtn('Cancel', () => vuGo('dash'), true)
+  ]));
+  setStatus();
+  drawSuggestions();
+};
