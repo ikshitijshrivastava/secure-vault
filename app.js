@@ -521,4 +521,21 @@ function openForm(doc) {
   show('view-edit');
 }
 
-// Auto-read the chosen fil
+// Auto-read the chosen file and show suggestions for review
+$('f-file').addEventListener('change', async e => {
+  pendingFile = e.target.files[0] || null;
+  const run = ++extractRun;
+  clearReview();
+  if (!pendingFile) return;
+
+  renderReview('Reading document on this device...');
+  try {
+    const result = await readDocument(pendingFile);
+    if (run !== extractRun) return;           // a newer file was chosen
+    if (result.error) {
+      renderReview(result.error + ' Enter details manually.');
+      return;
+    }
+    suggestions = buildSuggestions(result.text);
+    renderReview(suggestions.length
+      ? `Found ${suggestions.length} suggestion(s). Approve, ed
