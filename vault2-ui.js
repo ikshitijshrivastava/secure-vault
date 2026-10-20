@@ -183,3 +183,180 @@ pkBuild = function (text) {
   if (/identity\s+card/i.test(text) && /college|university|institute|school/i.test(text)) return vuCollegeSuggestions(text);
   return vuBasePkBuild(text);
 };
+/* ===== vault2-ui.js PART 2 of 3: navigation, profiles, person and vehicle forms. Append to the end. ===== */
+const VU = { root: null };
+const VU_OLD_VIEWS = ['view-setup', 'view-unlock', 'view-list', 'view-edit', 'view-detail'];
+const VU_LIST = 'list-style:none;padding:0;margin:0';
+
+function vuRootEl() {
+  if (!VU.root) {
+    VU.root = document.createElement('section');
+    VU.root.id = 'view-vault';
+    VU.root.className = 'view hidden';
+    document.querySelector('main').appendChild(VU.root);
+  }
+  return VU.root;
+}
+function vuHide() { if (VU.root) VU.root.classList.add('hidden'); }
+
+// Any screen change in the original app also hides the new vault screen
+const vuBaseShow = show;
+show = function (view) { vuHide(); vuBaseShow(view); };
+
+function vuOpen(tab) {
+  VU_OLD_VIEWS.forEach(v => $(v).classList.add('hidden'));
+  vuRootEl().classList.remove('hidden');
+  setTop(true);
+  vuGo(tab);
+}
+function vuClose() {
+  vuHide();
+  show('view-list');
+  renderList();
+}
+
+async function vuGo(tab, arg) {
+  const root = vuRootEl();
+  root.innerHTML = '';
+  root.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Dashboard', () => vuGo('dash'), tab !== 'dash'),
+    vuBtn('Profiles', () => vuGo('profiles'), !['profiles', 'person', 'vehicle'].includes(tab)),
+    vuBtn('+ Add document', () => vuGo('form'), tab !== 'form'),
+    vuBtn('Close', () => vuClose(), true)
+  ]));
+  const body = vuEl('div', {});
+  root.append(body);
+  try {
+    if (tab === 'dash') await vuDashboard(body);
+    else if (tab === 'profiles') await vuProfiles(body);
+    else if (tab === 'person') await vuPersonForm(body, arg);
+    else if (tab === 'vehicle') await vuVehicleForm(body, arg);
+    else if (tab === 'form') await vuForm(body, arg);
+    else if (tab === 'detail') await vuDetail(body, arg);
+  } catch (e) {
+    body.append(vuEl('p', { cls: 'error', text: 'Something went wrong: ' + e.message }));
+  }
+}
+
+/* ---------- profiles ---------- */
+async function vuProfiles(body) {
+  const all = await vuLoadAll();
+
+  body.append(vuEl('h2', { text: 'People' }));
+  const pl = vuEl('ul', { style: VU_LIST });
+  if (!all.people.length) pl.append(vuEl('p', { cls: 'hint', text: 'No people yet.' }));
+  for (const p of all.people) pl.append(await vuPersonCard(p, all));
+  body.append(pl, vuEl('div', { cls: 'row' }, [vuBtn('+ Add person', () => vuGo('person', null))]));
+
+  body.append(vuEl('h2', { text: 'Vehicles' }));
+  const vl = vuEl('ul', { style: VU_LIST });
+  if (!all.vehicles.length) vl.append(vuEl('p', { cls: 'hint', text: 'No vehicles yet.' }));
+  for (const v of all.vehicles) vl.append(vuVehicleCard(v, all));
+  body.append(vl, vuEl('div', { cls: 'row' }, [vuBtn('+ Add vehicle', () => vuGo('vehicle', null))]));
+}
+
+async function vuPersonCard(p, all) {
+  const url = await vuPhotoUrl(p.photoId);
+  const count = all.docs.filter(d => vuOwnersOf(d).includes(p.id)).length;
+  const photo = url
+    ? vuEl('img', { src: url, alt: '', style: 'width:64px;height:64px;object-fit:cover;border-radius:8px' })
+    : vuEl('div', { text: 'No photo', style: 'width:64px;height:64px;display:flex;align-items:center;justify-content:center;background:#eef1f6;border-radius:8px;font-size:12px;color:#667085' });
+  const del = vuBtn('Delete', async () => {
+    const solo = all.docs.filter(d => { const o = vuOwnersOf(d); return o.length === 1 && o[0] === p.id; }).length;
+    if (!confirm(`Delete ${p.name}? ${solo} document(s) that belong only to this person will be deleted. Shared documents stay with the others.`)) return;
+    try { await vuDeleteOwner('people', p); vuGo('profiles'); } catch (e) { alert('Delete failed: ' + e.message); }
+  }, true);
+  return vuEl('li', { cls: 'card none' }, [
+    vuEl('div', { cls: 'row', style: 'margin-top:0;align-items:center' }, [
+      photo,
+      vuEl('div', {}, [
+        vuEl('strong', { text: p.name }),
+        vuEl('small', { text: [p.relation, p.dob ? 'DOB ' + p.dob : '', count + ' document(s)'].filter(Boolean).join(' · ') }),
+        p.notes ? vuEl('small', { text: p.notes }) : ''
+      ])
+    ]),
+    vuEl('div', { cls: 'row' }, [vuBtn('Edit', () => vuGo('person', p.id), true), del])
+  ]);
+}
+
+function vuVehicleCard(v, all) {
+  const count = all.docs.filter(d => vuOwnersOf(d).includes(v.id)).length;
+  const del = vuBtn('Delete', async () => {
+    const solo = all.docs.filter(d => { const o = vuOwnersOf(d); return o.length === 1 && o[0] === v.id; }).length;
+    if (!confirm(`Delete vehicle ${v.number}? ${solo} document(s) that belong only to it will be deleted.`)) return;
+    try { await vuDeleteOwner('vehicles', v); vuGo('profiles'); } catch (e) { alert('Delete failed: ' + e.message); }
+  }, true);
+  return vuEl('li', { cls: 'card none' }, [
+    vuEl('strong', { text: v.number }),
+    vuEl('small', { text: [v.make, count + ' document(s)'].filter(Boolean).join(' · ') }),
+    v.notes ? vuEl('small', { text: v.notes }) : '',
+    vuEl('div', { cls: 'row' }, [vuBtn('Edit', () => vuGo('vehicle', v.id), true), del])
+  ]);
+}
+
+async function vuPersonForm(body, id) {
+  const all = await vuLoadAll();
+  const p = id ? all.people.find(x => x.id === id) : null;
+  const name = vuEl('input', { value: p ? p.name : '', placeholder: 'Full name' });
+  const rel = vuEl('select', {}, VU_RELATIONS.map(r => vuEl('option', { value: r, text: r })));
+  rel.value = p ? p.relation || 'Self' : 'Self';
+  const dob = vuEl('input', { type: 'date', value: p ? p.dob || '' : '' });
+  const notes = vuEl('textarea', { rows: 3, placeholder: 'Short profile, for example address, blood group, notes' });
+  notes.value = p ? p.notes || '' : '';
+  const photo = vuEl('input', { type: 'file', accept: 'image/*' });
+  const preview = vuEl('img', { alt: '', hidden: true, style: 'width:80px;height:80px;object-fit:cover;border-radius:8px' });
+  if (p && p.photoId) {
+    const u = await vuPhotoUrl(p.photoId);
+    if (u) { preview.src = u; preview.hidden = false; }
+  }
+  photo.addEventListener('change', () => {
+    const f = photo.files[0];
+    if (f) { preview.src = URL.createObjectURL(f); preview.hidden = false; }
+  });
+
+  body.append(vuEl('h2', { text: p ? 'Edit person' : 'Add person' }));
+  body.append(vuEl('form', { on: { submit: e => e.preventDefault() } }, [
+    vuField('Name', name), vuField('Relation', rel), vuField('Date of birth (optional)', dob),
+    vuField('Short profile', notes), vuField('Photo (optional)', photo), preview
+  ]));
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Save', async () => {
+      if (!name.value.trim()) return alert('Enter a name.');
+      try {
+        await vuSavePerson({
+          id: p ? p.id : null, name: name.value, relation: rel.value, dob: dob.value,
+          notes: notes.value, photoId: p ? p.photoId : null, createdAt: p ? p.createdAt : null
+        }, photo.files[0] || null);
+        vuGo('profiles');
+      } catch (e) { alert('Save failed: ' + e.message); }
+    }),
+    vuBtn('Cancel', () => vuGo('profiles'), true)
+  ]));
+}
+
+async function vuVehicleForm(body, id) {
+  const all = await vuLoadAll();
+  const v = id ? all.vehicles.find(x => x.id === id) : null;
+  const number = vuEl('input', { value: v ? v.number : '', placeholder: 'Registration number, e.g. WB06L2307' });
+  const make = vuEl('input', { value: v ? v.make || '' : '', placeholder: 'Make and model, e.g. Maruti Wagon R' });
+  const notes = vuEl('textarea', { rows: 2, placeholder: 'Notes' });
+  notes.value = v ? v.notes || '' : '';
+
+  body.append(vuEl('h2', { text: v ? 'Edit vehicle' : 'Add vehicle' }));
+  body.append(vuEl('form', { on: { submit: e => e.preventDefault() } }, [
+    vuField('Vehicle number', number), vuField('Make and model', make), vuField('Notes', notes)
+  ]));
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Save', async () => {
+      if (!number.value.trim()) return alert('Enter the vehicle number.');
+      try {
+        await vuSaveVehicle({
+          id: v ? v.id : null, number: number.value, make: make.value,
+          notes: notes.value, createdAt: v ? v.createdAt : null
+        });
+        vuGo('profiles');
+      } catch (e) { alert('Save failed: ' + e.message); }
+    }),
+    vuBtn('Cancel', () => vuGo('profiles'), true)
+  ]));
+}
