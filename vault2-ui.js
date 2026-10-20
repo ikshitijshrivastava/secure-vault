@@ -360,3 +360,345 @@ async function vuVehicleForm(body, id) {
     vuBtn('Cancel', () => vuGo('profiles'), true)
   ]));
 }
+/* ===== vault2-ui.js PART 3 of 3: dashboard, add and edit document, detail, buttons and tests. Append to the end. ===== */
+const VU_LBL = { title: 'Title', type: 'Type', number: 'Document number', issue: 'Issue date', expiry: 'Expiry date' };
+
+async function vuDashboard(body) {
+  const all = await vuLoadAll();
+  const map = vuNameMap(all);
+
+  body.append(vuEl('h2', { text: 'Dashboard' }));
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Import old documents', async () => {
+      try {
+        const n = await v2ImportOld();
+        alert('Imported ' + n + ' old document(s). They appear as Unassigned until you add owners.');
+        vuGo('dash');
+      } catch (e) { alert('Import failed: ' + e.message); }
+    }, true)
+  ]));
+
+  const search = vuEl('input', { type: 'search', placeholder: 'Search title, number, owner' });
+  const filter = vuEl('select', {}, [
+    vuEl('option', { value: '', text: 'Everyone' }),
+    ...all.people.map(p => vuEl('option', { value: p.id, text: 'Person: ' + p.name })),
+    ...all.vehicles.map(v => vuEl('option', { value: v.id, text: 'Vehicle: ' + v.number }))
+  ]);
+  const list = vuEl('ul', { style: VU_LIST });
+  body.append(vuEl('div', { cls: 'toolbar' }, [search, filter]), list);
+
+  // Latest version first: soonest expiry at the top, undated documents last
+  const groups = v2Dashboard(all.docs).sort((a, b) =>
+    (a.latest.expiry || '9999-12-31').localeCompare(b.latest.expiry || '9999-12-31'));
+
+  const draw = () => {
+    list.innerHTML = '';
+    const q = search.value.trim().toLowerCase();
+    let shown = 0;
+    for (const g of groups) {
+      const L = g.latest;
+      const owners = vuOwnersOf(L);
+      const ownerText = vuOwnerLabel(map, owners);
+      if (filter.value && !owners.includes(filter.value)) continue;
+      if (q && ![L.title, L.kind, L.number, ownerText].join(' ').toLowerCase().includes(q)) continue;
+      const s = statusOf(daysLeft(L.expiry));
+      list.append(vuEl('li', { cls: 'card ' + s.cls, on: { click: () => vuGo('detail', g.groupId) } }, [
+        vuEl('strong', { text: L.title || L.kind }),
+        vuEl('small', { text: ownerText + ' · ' + L.kind + (L.number ? ' · ' + L.number : '') }),
+        vuEl('span', { cls: 'badge', text: s.label }),
+        g.older.length ? vuEl('small', { text: g.older.length + ' older version(s) kept' }) : ''
+      ]));
+      shown++;
+    }
+    if (!shown) list.append(vuEl('p', { cls: 'hint', text: 'No documents match. Tap + Add document.' }));
+  };
+  search.addEventListener('input', draw);
+  filter.addEventListener('change', draw);
+  draw();
+}
+
+function vuDocInfo(d, map) {
+  const s = statusOf(daysLeft(d.expiry));
+  const rows = [
+    ['Owners', vuOwnerLabel(map, vuOwnersOf(d))], ['Kind', d.kind], ['Type', d.type],
+    ['Number', d.number], ['Issue date', d.issue], ['Expiry date', d.expiry],
+    ['Status', s.label], ['Notes', d.notes], ['Pages stored', String((d.pageIds || []).length)]
+  ];
+  const dl = vuEl('dl', {});
+  for (const [k, v] of rows) if (v) dl.append(vuEl('dt', { text: k }), vuEl('dd', { text: v }));
+  return dl;
+}
+
+async function vuOpenPage(pid) {
+  const url = await vuPhotoUrl(pid);
+  if (!url) return alert('This page could not be found.');
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+}
+function vuPagesRow(d) {
+  const row = vuEl('div', { cls: 'row' });
+  const pages = d.pageIds || [];
+  pages.forEach((pid, i) => row.append(vuBtn('Open page ' + (i + 1), () => vuOpenPage(pid), true)));
+  if (!pages.length) row.append(vuEl('small', { text: 'No pages stored' }));
+  return row;
+}
+
+async function vuDetail(body, groupId) {
+  const all = await vuLoadAll();
+  const map = vuNameMap(all);
+  const g = v2Dashboard(all.docs).find(x => x.groupId === groupId);
+  if (!g) { body.append(vuEl('p', { text: 'This document no longer exists.' })); return; }
+  const L = g.latest;
+
+  body.append(vuEl('h2', { text: L.title || L.kind }));
+  body.append(vuEl('p', { cls: 'hint', text: 'Latest version' }));
+  body.append(vuDocInfo(L, map), vuPagesRow(L));
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Edit or add pages', () => vuGo('form', L.id)),
+    vuBtn('Delete this version', () => vuDeleteVersion(L, groupId), true)
+  ]));
+
+  if (g.older.length) {
+    body.append(vuEl('h2', { text: 'Older versions (kept in storage)' }));
+    for (const d of g.older) {
+      body.append(vuEl('div', { cls: 'card none' }, [
+        vuEl('strong', { text: d.title || d.kind }),
+        vuEl('small', { text: 'Issued ' + (d.issue || '-') + ' · Expiry ' + (d.expiry || '-') }),
+        vuPagesRow(d),
+        vuEl('div', { cls: 'row' }, [
+          vuBtn('Edit', () => vuGo('form', d.id), true),
+          vuBtn('Delete', () => vuDeleteVersion(d, groupId), true)
+        ])
+      ]));
+    }
+  }
+}
+
+async function vuDeleteVersion(d, groupId) {
+  if (!confirm('Delete this version and its pages? Other versions stay.')) return;
+  try {
+    await v2DeleteDocument(d);
+    const left = (await v2List('docs')).some(x => x.groupId === groupId);
+    if (left) vuGo('detail', groupId);
+    else vuGo('dash');
+  } catch (e) { alert('Delete failed: ' + e.message); }
+}
+
+async function vuForm(body, editId) {
+  const all = await vuLoadAll();
+  const cur = editId ? all.docs.find(d => d.id === editId) || null : null;
+  const st = { files: [], suggestions: [] };
+
+  /* fields */
+  const title = vuEl('input', { value: cur ? cur.title || '' : '', placeholder: 'Title, e.g. Car insurance - WB06L2307' });
+  const kind = vuEl('select', {}, VU_KINDS.map(k => vuEl('option', { value: k.kind, text: k.kind })));
+  const kindVal = cur ? cur.kind || 'Other' : 'Other';
+  if (!VU_KINDS.some(k => k.kind === kindVal)) kind.append(vuEl('option', { value: kindVal, text: kindVal }));
+  kind.value = kindVal;
+  const type = vuEl('select', {}, VU_TYPES.map(t => vuEl('option', { value: t, text: t })));
+  type.value = cur ? cur.type || 'Other' : 'Other';
+  const number = vuEl('input', { value: cur ? cur.number || '' : '', placeholder: 'Document number' });
+  const issue = vuEl('input', { type: 'date', value: cur ? cur.issue || '' : '' });
+  const expiry = vuEl('input', { type: 'date', value: cur ? cur.expiry || '' : '' });
+  const notes = vuEl('textarea', { rows: 2 });
+  notes.value = cur ? cur.notes || '' : '';
+  const fieldEl = { title, type, number, issue, expiry };
+
+  /* owners: tick every person or vehicle this document belongs to */
+  const ownedNow = cur ? vuOwnersOf(cur) : [];
+  const owners = [];
+  const ownerBox = vuEl('div', { cls: 'review' });
+  const addOwner = (id, label) => {
+    const cb = vuEl('input', { type: 'checkbox', checked: ownedNow.includes(id) });
+    owners.push({ id, cb });
+    ownerBox.append(vuEl('label', {}, [cb, ' ' + label]));
+  };
+  all.people.forEach(p => addOwner(p.id, 'Person: ' + p.name));
+  all.vehicles.forEach(v => addOwner(v.id, 'Vehicle: ' + v.number));
+  if (!owners.length) ownerBox.append(vuEl('p', { cls: 'hint', text: 'Add a person or vehicle first in Profiles.' }));
+
+  /* renewal or group */
+  const renew = vuEl('select', {}, [
+    vuEl('option', { value: '', text: cur ? 'Keep current group' : 'Auto (same owner, type and number)' }),
+    ...all.docs.filter(d => !cur || d.id !== cur.id).map(d =>
+      vuEl('option', { value: d.id, text: 'Renewal of: ' + (d.title || d.kind) + ' (expiry ' + (d.expiry || '-') + ')' }))
+  ]);
+
+  /* files and status */
+  const files = vuEl('input', { type: 'file', multiple: true, accept: 'image/*,application/pdf' });
+  const status = vuEl('p', {
+    cls: 'hint',
+    text: cur ? 'Add more pages here if needed. Each photo takes about 30 seconds to read.'
+      : 'Attach one or more photos or a PDF. All files become pages of ONE document. Each photo takes about 30 seconds to read.'
+  });
+  const sugBox = vuEl('div', {});
+
+  const applyField = (field, value) => {
+    if (field === 'title') {
+      title.value = value;
+      const k = vuKindFromTitle(value);
+      if (k) kind.value = k.kind;
+    } else if (fieldEl[field]) {
+      fieldEl[field].value = value;
+    }
+  };
+
+  const drawSuggestions = () => {
+    sugBox.innerHTML = '';
+    if (!st.suggestions.length) return;
+    sugBox.append(vuBtn('Approve best suggestion for each field', () => {
+      const used = new Set();
+      st.suggestions = st.suggestions.filter(s => {
+        const t = s.targets[0];
+        if (s.targets.length === 1 && !used.has(t)) { used.add(t); applyField(t, s.value); return false; }
+        return true;
+      });
+      drawSuggestions();
+    }));
+    st.suggestions.forEach((s, i) => {
+      const done = field => {
+        if (field) applyField(field, s.value);
+        st.suggestions.splice(i, 1);
+        drawSuggestions();
+      };
+      const btns = vuEl('div', { cls: 'row' });
+      if (s.targets.length > 1) {
+        s.targets.forEach(t => btns.append(vuBtn('Use as ' + VU_LBL[t].toLowerCase(), () => done(t))));
+      } else {
+        const t = s.targets[0];
+        btns.append(vuBtn('Approve', () => done(t)));
+        btns.append(vuBtn('Edit', () => {
+          applyField(t, s.value);
+          st.suggestions.splice(i, 1);
+          drawSuggestions();
+          fieldEl[t].focus();
+        }, true));
+      }
+      btns.append(vuBtn('Dismiss', () => done(null), true));
+      sugBox.append(vuEl('div', { cls: 'sugg' }, [
+        vuEl('strong', { text: s.targets.map(t => VU_LBL[t]).join(' or ') + ': ' + s.value }),
+        vuEl('small', { text: (s.note ? s.note + ' · ' : '') + 'Found in: "' + s.snippet + '"' }),
+        btns
+      ]));
+    });
+  };
+
+  // Reads every attached file as pages of one document and builds suggestions from all of them
+  files.addEventListener('change', async () => {
+    st.files = Array.from(files.files || []);
+    st.suggestions = [];
+    drawSuggestions();
+    if (!st.files.length) { status.textContent = ''; return; }
+    let text = '';
+    for (let i = 0; i < st.files.length; i++) {
+      status.textContent = 'Reading page ' + (i + 1) + ' of ' + st.files.length + ' on this device...';
+      try {
+        const r = await readDocument(st.files[i]);
+        if (r.error) status.textContent = r.error;
+        else text += '\n' + r.text;
+      } catch (e) {
+        status.textContent = 'Could not read page ' + (i + 1) + ': ' + e.message;
+      }
+    }
+    if (text.trim()) {
+      st.suggestions = buildSuggestions(text);
+      const hits = new Set([...vuMatchPeople(text, all.people), ...vuMatchVehicles(text, all.vehicles)]);
+      if (!cur && hits.size) owners.forEach(o => { o.cb.checked = hits.has(o.id); });
+      status.textContent = 'Found ' + st.suggestions.length + ' suggestion(s). Owners were ticked where a name or vehicle number matched. Approve, edit or dismiss each one.';
+    }
+    drawSuggestions();
+  });
+
+  const saveDoc = async () => {
+    const t = title.value.trim();
+    if (!t) return alert('Enter a title.');
+    const ownerIds = owners.filter(o => o.cb.checked).map(o => o.id);
+    try {
+      const id = cur ? cur.id : newId();
+      const newPages = await vuStorePages(id, st.files, cur ? (cur.pageIds || []).length : 0);
+      const pageIds = [...(cur ? cur.pageIds || [] : []), ...newPages];
+      let groupId;
+      if (renew.value) {
+        const target = all.docs.find(d => d.id === renew.value);
+        groupId = target ? target.groupId : vuGroupKey(ownerIds, kind.value, number.value, id);
+      } else if (cur) {
+        groupId = cur.groupId;
+      } else {
+        groupId = vuGroupKey(ownerIds, kind.value, number.value, id);
+      }
+      await v2Put('docs', {
+        id, owners: ownerIds, ownerId: ownerIds[0] || null,
+        kind: kind.value, type: type.value, title: t, number: number.value.trim(),
+        issue: issue.value, expiry: expiry.value, notes: notes.value.trim(),
+        pageIds, groupId, createdAt: cur ? cur.createdAt : Date.now(), updatedAt: Date.now()
+      });
+      vuGo('detail', groupId);
+    } catch (e) { alert('Save failed: ' + e.message); }
+  };
+
+  body.append(vuEl('h2', { text: cur ? 'Edit document' : 'Add document' }));
+  body.append(vuEl('form', { on: { submit: e => e.preventDefault() } }, [
+    vuField('Title', title), vuField('Kind', kind), vuField('Type', type),
+    vuField('Document number', number), vuField('Issue date', issue), vuField('Expiry date', expiry),
+    vuField('Notes', notes),
+    vuEl('span', { text: 'Owners: tick every family member or vehicle this document belongs to' }),
+    ownerBox,
+    vuField('Renewal or group', renew),
+    vuField(cur ? 'Add more pages' : 'Pages: photos or PDF (select several at once)', files)
+  ]));
+  body.append(status, sugBox, vuEl('div', { cls: 'row' }, [
+    vuBtn('Save document', saveDoc),
+    vuBtn('Cancel', () => vuGo('dash'), true)
+  ]));
+  drawSuggestions();
+}
+
+/* ---------- buttons added to the existing screens ---------- */
+(function vuBoot() {
+  const bar = document.querySelector('.toolbar');
+  if (bar && !document.getElementById('vu-open')) {
+    const a = vuBtn('Vault dashboard', () => vuOpen('dash'), true);
+    a.id = 'vu-open';
+    const b = vuBtn('Profiles', () => vuOpen('profiles'), true);
+    b.id = 'vu-profiles';
+    bar.append(a, b);
+  }
+  const oldAdd = document.getElementById('btn-add');
+  if (oldAdd) oldAdd.classList.add('hidden');
+  const bk = document.querySelector('.backup');
+  if (bk && !document.getElementById('vu-test')) {
+    const t = vuBtn('Run reader tests (voter, college)', () => vuSelfTest(), true);
+    t.id = 'vu-test';
+    bk.append(t);
+  }
+})();
+
+/* ---------- reader tests using your uploaded voter ID and college ID text ---------- */
+function vuSelfTest() {
+  const voter = "ELECTION COMMISSION OF INDIA IDENTITY CARD GDH9779703 Elector's Name :LALEET Father's Name :HARKISHOR Sex / MALE Age as on 1.1.2003 :66 Years Address : HNO. 3106/2 COLLEGE WARD Date : 10-02-2003";
+  const college = "GOVERNMENT MODEL COLLEGE OF SCIENCE RAIPUR IDENTITY CARD S. No. Name LALIT KUMAR SRIVASTAVA Father/Husband Name SRI H.K. SRIVASTAVA Date of Birth 15.10.1938 Designation PROFESSOR PHYSICS Bearer Principal";
+  const tests = [
+    { name: 'Voter ID', text: voter,
+      expect: { title: 'Voter ID card - Laleet', type: 'Identity', number: 'GDH9779703', issue: '2003-02-10' },
+      absent: ['expiry'] },
+    { name: 'College ID', text: college,
+      expect: { title: 'College ID card - Lalit Kumar Srivastava', type: 'Identity' },
+      absent: ['number', 'issue', 'expiry'] }
+  ];
+  const lines = [];
+  for (const t of tests) {
+    const got = buildSuggestions(t.text);
+    const pick = k => got.find(s => s.targets.length === 1 && s.targets[0] === k);
+    lines.push('-- ' + t.name + ' (detected: ' + PK_LAST + ')');
+    for (const k of Object.keys(t.expect)) {
+      const s = pick(k);
+      const ok = !!s && s.value === t.expect[k];
+      lines.push((ok ? 'PASS  ' : 'FAIL  ') + k + ': ' + (s ? s.value : 'nothing found'));
+    }
+    for (const k of t.absent) {
+      const s = pick(k);
+      lines.push((s ? 'FAIL  ' : 'PASS  ') + 'no ' + k + ' suggested' + (s ? ' (got ' + s.value + ')' : ''));
+    }
+  }
+  alert('Reader tests\n\n' + lines.join('\n'));
+         }
