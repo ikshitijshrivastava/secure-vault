@@ -1,0 +1,14 @@
+# Never commit personal data
+*.vault
+*.pdf
+*.jpg
+*.jpeg
+*.png
+exports/
+documents/
+test-data/
+
+# Dependencies and system files
+node_modules/
+.DS_Store
+Thumbs.db
