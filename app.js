@@ -906,3 +906,37 @@ function buildSuggestions(text) {
   }
   return out;
                                                  }
+/* ================= Vehicle number reader (replaces older extractVehicleNo) ================= */
+
+const INDIAN_STATE_CODES = new Set([
+  'AN', 'AP', 'AR', 'AS', 'BR', 'BH', 'CG', 'CH', 'DD', 'DL', 'DN', 'GA', 'GJ',
+  'HP', 'HR', 'JH', 'JK', 'KA', 'KL', 'LA', 'LD', 'MH', 'ML', 'MN', 'MP', 'MZ',
+  'NL', 'OD', 'PB', 'PY', 'RJ', 'SK', 'TN', 'TG', 'TS', 'TR', 'UP', 'UK', 'UA', 'WB'
+]);
+
+// Convert letters that OCR often mistakes for digits, and the reverse
+const fixAsLetters = s => s.replace(/0/g, 'O').replace(/1/g, 'I').replace(/5/g, 'S').replace(/8/g, 'B');
+const fixAsDigits = s => s.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/B/g, '8');
+
+// Finds a vehicle registration number, ignoring spaces, hyphens and dots
+// Examples accepted: MH12AB1234, MH 12 AB 1234, MH-12-AB-1234, MH12 AB1234, 22BH1234AA
+function extractVehicleNo(text) {
+  const clean = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  // Bharat (BH) series, e.g. 22BH1234AA
+  const bh = clean.match(/(\d{2})BH([0-9OILSB]{4})([A-Z]{1,2})/);
+  if (bh) return `${bh[1]}BH${fixAsDigits(bh[2])}${bh[3]}`;
+
+  // Standard format: state (2 letters), district (1-2 digits), series (1-3 letters), number (4 digits)
+  // Lookahead lets overlapping candidates be checked one by one
+  const re = /(?=([A-Z0-9]{2})([0-9OILSB]{1,2})([A-Z0-9]{1,3})([0-9OILSB]{4}))/g;
+  for (const m of clean.matchAll(re)) {
+    const state = fixAsLetters(m[1]);
+    if (!INDIAN_STATE_CODES.has(state)) continue;
+    const district = fixAsDigits(m[2]).padStart(2, '0');
+    const series = fixAsLetters(m[3]);
+    const number = fixAsDigits(m[4]);
+    return `${state}${district}${series}${number}`;
+  }
+  return null;
+                   }
