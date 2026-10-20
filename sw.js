@@ -1,29 +1,11 @@
-const CACHE = 'vault-v1';   // bump this (e.g. 'vault-v2') on every release
-
-const SHELL = [
-  './',
-  'index.html',
-  'style.css',
-  'app.js',
-  'manifest.json',
-  'icon.svg'
-];
-
-// Optional OCR files. Edit this list to match the exact file names you copied into vendor/.
-const OPTIONAL = [
-  'vendor/tesseract.min.js',
-  'vendor/worker.min.js',
-  'vendor/core/tesseract-core-simd-lstm.wasm.js',
-  'vendor/lang/eng.traineddata.gz'
-];
+const CACHE = 'vault-v3';   // bump on every release
+const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
+const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
     await cache.addAll(SHELL);
-    for (const url of OPTIONAL) {
-      try { await cache.add(url); } catch { /* missing optional file: skip */ }
-    }
     self.skipWaiting();
   })());
 });
@@ -38,8 +20,41 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
-  event.respondWith(
-    caches.match(event.request).then(hit => hit || fetch(event.request))
-  );
+  const req = event.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.origin === self.location.origin) {
+    event.respondWith(networkFirst(req));   // your own files: fresh when online
+  } else if (CDN_HOSTS.includes(url.hostname)) {
+    event.respondWith(cacheFirst(req));     // libraries: keep after first download
+  }
 });
+
+// Your app files: use the network if online, otherwise the saved copy
+async function networkFirst(req) {
+  const cache = await caches.open(CACHE);
+  try {
+    const res = await fetch(req);
+    if (res.ok) cache.put(req, res.clone()).catch(() => {});
+    return res;
+  } catch {
+    const hit = await cache.match(req);
+    if (hit) return hit;
+    if (req.mode === 'navigate') return cache.match('index.html');
+    return Response.error();
+  }
+}
+
+// Libraries from the CDN: use the saved copy if present, otherwise download and save
+async function cacheFirst(req) {
+  const cache = await caches.open(CACHE);
+  const hit = await cache.match(req);
+  if (hit) return hit;
+  try {
+    const res = await fetch(req);
+    if (res.ok || res.type === 'opaque') cache.put(req, res.clone()).catch(() => {});
+    return res;
+  } catch {
+    return Response.error();
+  }
+}
