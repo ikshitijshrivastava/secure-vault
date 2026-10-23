@@ -94,3 +94,151 @@ vuDocInfo = function (d, map) {
   );
   return el;
 };
+/* ===== issuer.js PART 2 of 3. Append to the end. Issuer review screen for existing documents, and tests. ===== */
+
+// Reads every stored page of a document and returns the combined text
+async function ssDocText(d) {
+  let text = '';
+  for (const pid of d.pageIds || []) {
+    const p = await v2GetPage(pid);
+    if (!p) continue;
+    const file = new File([p.bytes], p.meta.name || 'page', { type: p.meta.mime || '' });
+    const r = await readDocument(file);
+    if (!r.error) text += '\n' + (r.text || '');
+  }
+  return text;
+}
+
+// Review screen: suggests an issuer for each document, which you can edit before saving
+async function ssIssuerScreen(body) {
+  const all = await vuLoadAll();
+  const map = vuNameMap(all);
+
+  body.append(vuEl('h2', { text: 'Issuer suggestions' }));
+  body.append(vuEl('p', { cls: 'hint', text: 'Reads the stored pages of each document and suggests who issued it. Nothing changes until you tap Save issuers. Photos take about 30 seconds each.' }));
+  const status = vuEl('p', { cls: 'hint' });
+  const list = vuEl('ul', { style: 'list-style:none;padding:0;margin:0' });
+  body.append(status, list);
+
+  const rows = all.docs
+    .slice()
+    .sort((a, b) => (a.title || a.kind || '').localeCompare(b.title || b.kind || ''))
+    .map(d => {
+      const input = vuEl('input', { value: d.issuer || '', placeholder: 'Issuer name' });
+      const note = vuEl('small', { text: d.issuer ? 'Issuer already saved' : 'Not set' });
+      list.append(vuEl('li', { cls: 'card', style: 'border-left-color:' + (d.issuer ? '#2e7d32' : '#b26a00') }, [
+        vuEl('strong', { text: d.title || d.kind }),
+        vuEl('small', { text: vuOwnerLabel(map, vuOwnersOf(d)) + ' · ' + (d.kind || '') }),
+        note,
+        input
+      ]));
+      return { d, input, note };
+    });
+
+  if (!rows.length) list.append(vuEl('p', { cls: 'hint', text: 'No documents yet.' }));
+
+  const readBtn = vuBtn('Read pages and suggest', async () => {
+    readBtn.disabled = true;
+    let found = 0;
+    for (const r of rows) {
+      if (r.d.issuer) continue;
+      status.textContent = 'Reading ' + (r.d.title || r.d.kind) + '...';
+      try {
+        const text = await ssDocText(r.d);
+        const s = text.trim() ? ssIssuer(text) : null;
+        if (s) {
+          r.input.value = s.value;
+          r.note.textContent = 'Suggested from: "' + s.snippet + '"';
+          found++;
+        } else {
+          r.note.textContent = 'No issuer found. Type it in.';
+        }
+      } catch (e) {
+        r.note.textContent = 'Could not read: ' + e.message;
+      }
+    }
+    status.textContent = 'Done. ' + found + ' suggestion(s). Check each one, then tap Save issuers.';
+    readBtn.disabled = false;
+  });
+
+  const saveBtn = vuBtn('Save issuers', async () => {
+    let changed = 0;
+    try {
+      for (const r of rows) {
+        const val = r.input.value.trim();
+        if (!val || val === (r.d.issuer || '')) continue;
+        await v2Put('docs', { ...r.d, issuer: val, updatedAt: Date.now() });
+        changed++;
+      }
+      alert(changed ? 'Saved ' + changed + ' issuer(s).' : 'Nothing new to save.');
+      vuGo('issuers');
+    } catch (e) { alert('Save failed: ' + e.message); }
+  });
+
+  body.append(vuEl('div', { cls: 'row' }, [readBtn, saveBtn]));
+}
+
+// Adds the "issuers" screen to the existing navigation
+const ssBaseGo = vuGo;
+vuGo = async function (tab, arg) {
+  if (tab !== 'issuers') return ssBaseGo(tab, arg);
+  const root = vuRootEl();
+  root.innerHTML = '';
+  root.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Dashboard', () => vuGo('dash'), true),
+    vuBtn('Profiles', () => vuGo('profiles'), true),
+    vuBtn('+ Add document', () => vuGo('form'), true),
+    vuBtn('Close', () => vuClose(), true)
+  ]));
+  const body = vuEl('div', {});
+  root.append(body);
+  try { await ssIssuerScreen(body); }
+  catch (e) { body.append(vuEl('p', { cls: 'error', text: 'Something went wrong: ' + e.message })); }
+};
+
+// Adds a button to the dashboard that opens the issuer review screen
+const ssBaseDash = vuDashboard;
+vuDashboard = async function (body) {
+  await ssBaseDash(body);
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Suggest issuers for existing documents', () => vuGo('issuers'), true)
+  ]));
+};
+
+/* ---------- tests: each line should show PASS ---------- */
+const SS_TESTS = [
+  { name: 'Car insurance', expect: 'TATA AIG GENERAL INSURANCE COMPANY LIMITED',
+    text: 'Auto Secure - Private Car Package Policy Registered office : Peninsula Business Park, Mumbai. TATA AIG GENERAL INSURANCE COMPANY LIMITED' },
+  { name: 'Marksheet', expect: 'CENTRAL BOARD OF SECONDARY EDUCATION',
+    text: 'CENTRAL BOARD OF SECONDARY EDUCATION MARKS SHEET Roll No 123456 Name RAHUL' },
+  { name: 'Birth certificate', expect: 'Municipal Corporation of Bengaluru',
+    text: 'BIRTH CERTIFICATE issued by Municipal Corporation of Bengaluru Registration No 4567 dated 12/03/2001' },
+  { name: 'Certificate', expect: 'Tech Institute Bangalore',
+    text: 'This is to certify that Priya Sharma has completed the course conducted by Tech Institute Bangalore for the purpose of training' },
+  { name: 'Driving licence', expect: 'Licensing Authority, BENGALURU',
+    text: 'Sign. Licencing Authority BENGALURU(S) CDOI : 23-08-2024' },
+  { name: 'Voter ID', expect: 'Election Commission of India',
+    text: 'ELECTION COMMISSION OF INDIA IDENTITY CARD Elector Name LALEET' }
+];
+
+function ssSelfTest() {
+  const lines = SS_TESTS.map(t => {
+    const s = ssIssuer(t.text);
+    const got = s ? s.value : 'nothing found';
+    const ok = got === t.expect;
+    return (ok ? 'PASS  ' : 'FAIL  ') + t.name + ': ' + got + (ok ? '' : '  (expected ' + t.expect + ')');
+  });
+  alert('Issuer tests\n\n' + lines.join('\n'));
+}
+
+(function ssButton() {
+  const bk = document.querySelector('.backup');
+  if (!bk || document.getElementById('ss-test')) return;
+  const b = document.createElement('button');
+  b.id = 'ss-test';
+  b.type = 'button';
+  b.className = 'ghost';
+  b.textContent = 'Run issuer tests';
+  b.onclick = ssSelfTest;
+  bk.appendChild(b);
+})();
