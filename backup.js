@@ -366,3 +366,242 @@ enterApp = function () {
   setTimeout(bkTick, 1500);
 };
 setInterval(bkTick, 60000);
+/* ===== backup.js PART 2B of 3. Append to the end. Backup screen, restore, tests and buttons. ===== */
+async function bkRestoreUI(file) {
+  // Old .vault files go through the existing import
+  if (/\.vault$/i.test(file.name)) {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const inp = $('import-file');
+    inp.files = dt.files;
+    inp.dispatchEvent(new Event('change'));
+    return;
+  }
+  const password = prompt('Enter the master password used for this backup:');
+  if (!password) return;
+  if (!confirm('This replaces ALL data on this device with the backup. A safety copy of the current data is downloaded first. Continue?')) return;
+  let wiped = false;
+  try {
+    bkReport('Saving a safety copy of current data...');
+    const safety = await bkBuild();
+    dvSaveBlob(new Blob([safety.bytes], { type: 'application/octet-stream' }),
+      'vault-safety-copy-' + bkStamp() + '.vbk');
+    bkReport('Checking the backup...');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const { payload, k } = await bkDecode(bytes, password);
+    await bkCheckPayload(payload, k);
+    bkReport('Restoring...');
+    wiped = true;
+    await bkWipeAll();
+    await bkWriteAll(payload);
+    lockVault();
+    alert('Restored ' + bkCountText(payload.counts) +
+      '.\nUnlock with the master password used for this backup.');
+  } catch (e) {
+    bkReport(wiped
+      ? 'Restore stopped part way: ' + e.message + ' Use the safety copy you downloaded to recover.'
+      : 'Restore stopped: ' + e.message + ' Your current data was not changed.');
+  }
+}
+
+async function bkScreen(body) {
+  const s = bkSettings();
+  const h = await bkHandleGet().catch(() => null);
+  const canFolder = typeof window.showDirectoryPicker === 'function';
+  const canShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
+
+  body.append(vuEl('h2', { text: 'Backup and restore' }));
+  body.append(vuEl('p', { cls: 'hint', text: 'A backup holds everything in the vault: people, photos, vehicles, documents, pages and issuers. Each file is compressed, then encrypted with your master password.' }));
+
+  const next = s.enabled ? bkNextSlot(s, new Date()) : null;
+  body.append(vuEl('ul', { style: VU_LIST }, [
+    vuEl('li', { text: 'Last backup: ' + (s.lastRun ? new Date(s.lastRun).toLocaleString() : 'never') }),
+    vuEl('li', { text: 'Next automatic backup: ' + (s.enabled ? (next ? next.toLocaleString() : '-') : 'off') }),
+    vuEl('li', { text: 'Backup folder: ' + (h ? h.name : (canFolder ? 'not chosen' : 'not available on this device')) })
+  ]));
+  const status = vuEl('p', { cls: 'hint', text: s.lastInfo ? 'Last result: ' + s.lastInfo : '' });
+  BK_STATUS = status;
+  body.append(status);
+
+  /* save now */
+  body.append(vuEl('h2', { text: 'Save a backup now' }));
+  const row = vuEl('div', { cls: 'row' });
+  if (canFolder) {
+    row.append(vuBtn('Choose backup folder (PC drive D or E, or a synced cloud folder)', async () => {
+      try {
+        const dir = await window.showDirectoryPicker({ mode: 'readwrite', id: 'vault-backups' });
+        await bkHandleSet(dir);
+        bkReport('Backup folder set to ' + dir.name + '. Tap "Save to backup folder" to back up now.');
+        vuGo('backup');
+      } catch (e) {
+        if (e.name !== 'AbortError') bkReport('Could not set folder: ' + e.message);
+      }
+    }, true));
+    row.append(vuBtn('Save to backup folder', () => bkManual('folder', true)));
+  }
+  row.append(vuBtn('Download backup file', () => bkManual('download', false)));
+  if (canShare) row.append(vuBtn('Share (Google Drive, email)', () => bkManual('share', false)));
+  body.append(row);
+
+  /* restore */
+  body.append(vuEl('h2', { text: 'Restore' }));
+  const picker = vuEl('input', { type: 'file', accept: '.vbk,.vault,application/octet-stream,application/json' });
+  picker.style.display = 'none';
+  picker.addEventListener('change', () => {
+    const f = picker.files[0];
+    picker.value = '';
+    if (f) bkRestoreUI(f);
+  });
+  body.append(picker);
+  body.append(vuEl('div', { cls: 'row' }, [vuBtn('Choose backup file to restore', () => picker.click(), true)]));
+  body.append(vuEl('p', { cls: 'hint', text: 'Restoring replaces everything on this device. A safety copy of the current data is downloaded first. Use this on a new device or after data loss.' }));
+
+  /* automatic backup */
+  body.append(vuEl('h2', { text: 'Automatic backup' }));
+  body.append(vuEl('p', { cls: 'hint', text: 'Runs while the app is open at the set time. If the time passes while the app is closed, the backup is marked due and runs or asks you the next time you unlock the vault.' }));
+
+  const enabled = vuEl('input', { type: 'checkbox' });
+  enabled.checked = !!s.enabled;
+  const mode = vuEl('select', {}, [
+    vuEl('option', { value: 'folder', text: 'Folder on this PC or a cloud drive folder' }),
+    vuEl('option', { value: 'download', text: 'Download file (move it yourself)' }),
+    vuEl('option', { value: 'share', text: 'Share sheet (Google Drive, email)' })
+  ]);
+  mode.value = s.mode;
+  const freq = vuEl('select', {}, [
+    vuEl('option', { value: 'daily', text: 'Every day' }),
+    vuEl('option', { value: 'weekly', text: 'Every week' }),
+    vuEl('option', { value: 'monthly', text: 'Every month' })
+  ]);
+  freq.value = s.freq;
+  const WD = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const weekday = vuEl('select', {}, WD.map((d, i) => vuEl('option', { value: String(i), text: d })));
+  weekday.value = String(s.weekday);
+  const monthday = vuEl('select', {}, Array.from({ length: 28 }, (_, i) =>
+    vuEl('option', { value: String(i + 1), text: 'Day ' + (i + 1) })));
+  monthday.value = String(s.monthday);
+  const time = vuEl('input', { type: 'time', value: s.time });
+  const keep = vuEl('input', { type: 'number', min: '1', max: '100', value: String(s.keep) });
+  const dayRow = vuEl('label', {}, [vuEl('span', { text: 'Day' }), weekday, monthday]);
+  const syncDay = () => {
+    weekday.style.display = freq.value === 'weekly' ? '' : 'none';
+    monthday.style.display = freq.value === 'monthly' ? '' : 'none';
+    dayRow.style.display = freq.value === 'daily' ? 'none' : '';
+  };
+  freq.addEventListener('change', syncDay);
+  syncDay();
+
+  body.append(vuEl('form', { on: { submit: e => e.preventDefault() } }, [
+    vuEl('label', {}, [enabled, ' Turn on automatic backup']),
+    vuField('Where to save', mode),
+    vuField('How often', freq),
+    dayRow,
+    vuField('Time', time),
+    vuField('Keep this many backups in the folder', keep)
+  ]));
+  body.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Save schedule', () => {
+      const prev = bkSettings();
+      const next2 = {
+        ...prev,
+        enabled: enabled.checked, mode: mode.value, freq: freq.value,
+        weekday: Number(weekday.value), monthday: Number(monthday.value),
+        time: time.value || '20:00',
+        keep: Math.min(100, Math.max(1, Number(keep.value) || 10))
+      };
+      // Turning the schedule on starts the count now, so the first backup waits for the next set time
+      if (next2.enabled && !prev.enabled) next2.lastRun = Date.now();
+      bkSaveSettings(next2);
+      const nx = next2.enabled ? bkNextSlot(next2, new Date()) : null;
+      bkReport(next2.enabled
+        ? 'Schedule saved. Next backup: ' + (nx ? nx.toLocaleString() : '-') +
+          (next2.mode === 'folder' && !h ? '. Choose a backup folder above first.' : '')
+        : 'Automatic backup is off.');
+    })
+  ]));
+
+  /* checks */
+  body.append(vuEl('h2', { text: 'Checks' }));
+  body.append(vuEl('p', { cls: 'hint', text: 'Runs a full round trip, a tamper check, a wrong-password check, a compression check and the schedule calculation. Your data is not changed.' }));
+  body.append(vuBtn('Run backup tests', () => bkSelfTest(), true));
+}
+
+async function bkSelfTest() {
+  const lines = [];
+  const pass = (ok, msg) => lines.push((ok ? 'PASS  ' : 'FAIL  ') + msg);
+  try {
+    if (!key) throw new Error('unlock the vault first');
+    const built = await bkBuild();
+    const reduce = built.sizeIn ? Math.round(100 * (1 - built.sizeOut / built.sizeIn)) : 0;
+    lines.push('INFO  JSON ' + bkKb(built.sizeIn) + ', backup file ' + bkKb(built.sizeOut) + ' (' + reduce + '% smaller)');
+    lines.push('INFO  contents: ' + bkCountText(built.counts));
+
+    const payload = await bkUnwrap(built.bytes, key);
+    pass(JSON.stringify(payload.counts) === JSON.stringify(built.counts), 'round trip: every record came back');
+    const cfgRow = (payload.old.meta || []).find(r => r.id === 'config');
+    pass(!!cfgRow, 'vault configuration is inside the backup');
+    await bkCheckPayload(payload, key);
+    pass(true, 'vault check and sample document decrypt');
+
+    const bad = built.bytes.slice();
+    bad[bad.length - 5] ^= 0x01;
+    let rejected = false;
+    try { await bkUnwrap(bad, key); } catch { rejected = true; }
+    pass(rejected, 'a changed byte is detected and the backup is rejected');
+
+    const wrongKey = await deriveKey('wrong-password-for-test', bkUnpack(cfgRow).salt);
+    let wrongRejected = false;
+    try { await bkUnwrap(built.bytes, wrongKey); } catch { wrongRejected = true; }
+    pass(wrongRejected, 'a wrong password is rejected');
+
+    const sample = enc.encode('Compression test line. '.repeat(300));
+    const back = await bkPipe(await bkPipe(sample, new CompressionStream('gzip')), new DecompressionStream('gzip'));
+    pass(dec.decode(back) === dec.decode(sample), 'compression round trip');
+
+    const sched = { ...BK_DEFAULT, enabled: true, freq: 'weekly', weekday: 0, time: '20:00' };
+    const now = new Date(2026, 9, 23, 10, 0);     // Friday 23 Oct 2026, 10:00
+    const nx = bkNextSlot(sched, now);
+    const pv = bkPrevSlot(sched, now);
+    pass(!!nx && nx.getDate() === 25 && nx.getHours() === 20, 'next weekly slot is Sunday 25 Oct 20:00');
+    pass(!!pv && pv.getDate() === 18 && pv.getHours() === 20, 'previous weekly slot is Sunday 18 Oct 20:00');
+
+    lines.push('INFO  folder saving: ' + (typeof window.showDirectoryPicker === 'function'
+      ? 'available on this browser' : 'not on this device, use Download or Share'));
+    lines.push('INFO  share sheet: ' + (navigator.share ? 'available' : 'not available'));
+  } catch (e) {
+    lines.push('FAIL  test stopped: ' + e.message);
+  }
+  alert('Backup tests\n\n' + lines.join('\n'));
+}
+
+/* ---------- navigation: the backup screen inside the vault ---------- */
+const bkBaseGo = vuGo;
+vuGo = async function (tab, arg) {
+  if (tab !== 'backup') return bkBaseGo(tab, arg);
+  const root = vuRootEl();
+  root.innerHTML = '';
+  root.append(vuEl('div', { cls: 'row' }, [
+    vuBtn('Dashboard', () => vuGo('dash'), true),
+    vuBtn('Profiles', () => vuGo('profiles'), true),
+    vuBtn('Close', () => vuClose(), true)
+  ]));
+  const body = vuEl('div', {});
+  root.append(body);
+  try { await bkScreen(body); }
+  catch (e) { body.append(vuEl('p', { cls: 'error', text: 'Something went wrong: ' + e.message })); }
+};
+
+/* ---------- buttons: the old Export button now opens the backup screen ---------- */
+(function bkWire() {
+  const exp = document.getElementById('btn-export');
+  if (exp) {
+    exp.textContent = 'Backup and restore';
+    exp.onclick = () => vuOpen('backup');
+  }
+  const bar = document.querySelector('.toolbar');
+  if (bar && !document.getElementById('bk-open')) {
+    const b = vuBtn('Backup', () => vuOpen('backup'), true);
+    b.id = 'bk-open';
+    bar.append(b);
+  }
+})();
