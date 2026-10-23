@@ -220,16 +220,7 @@ async function openPdf(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   return pdfjsLib.getDocument({ data: bytes }).promise;
 }
-async function pdfText(pdf) {
-  let text = '';
-  const last = Math.min(pdf.numPages, 3);
-  for (let i = 1; i <= last; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    text += content.items.map(it => it.str).join(' ') + '\n';
-  }
-  return text;
-}
+
 async function pdfFirstPageImage(pdf) {
   const page = await pdf.getPage(1);
   const vp = page.getViewport({ scale: 2 });
@@ -305,45 +296,7 @@ const DOC_TYPES = [
 ];
 
 // Builds suggestions. Each one can fill one or more form fields.
-function buildSuggestions(text) {
-  const out = [];
-  const seen = new Set();
-  const snip = (idx, len) =>
-    text.slice(Math.max(0, idx - 30), idx + len + 10).replace(/\s+/g, ' ').trim();
-  const add = (targets, value, snippet) => {
-    const k = targets.join() + '|' + value;
-    if (!value || seen.has(k) || out.length >= 12) return;
-    seen.add(k);
-    out.push({ targets, value, snippet });
-  };
 
-  // Document type and suggested title
-  const dt = DOC_TYPES.find(d => d.re.test(text));
-  if (dt) {
-    const m = text.match(dt.re);
-    const sn = snip(m.index, m[0].length);
-    add(['type'], dt.type, sn);
-    add(['title'], dt.title, sn);
-  }
-
-  // Document number: first "No", "Number" or "Nbr" followed by a value containing a digit
-  for (const m of text.matchAll(/\b(?:no|number|nbr)\b\.?\s*[:\-#]?\s*([A-Z0-9][A-Z0-9\-\/]{4,24})\b/gi)) {
-    if (/\d/.test(m[1])) {
-      add(['number'], m[1].toUpperCase(), snip(m.index, m[0].length));
-      break;
-    }
-  }
-
-  // Dates: label nearby decides expiry or issue; unknown dates offer both
-  for (const d of findDates(text)) {
-    const before = text.slice(Math.max(0, d.idx - 30), d.idx).toLowerCase();
-    const sn = snip(d.idx, d.len);
-    if (EXPIRY_HINT.test(before)) add(['expiry'], d.value, sn);
-    else if (ISSUE_HINT.test(before)) add(['issue'], d.value, sn);
-    else add(['issue', 'expiry'], d.value, sn);
-  }
-  return out;
-}
 
 /* ================= Review panel ================= */
 const FIELD_IDS = { title: 'f-title', type: 'f-type', number: 'f-number', issue: 'f-issue', expiry: 'f-expiry' };
@@ -365,74 +318,7 @@ function clearReview() {
   const box = $('review');
   if (box) box.remove();
 }
-function renderReview(statusText) {
-  let box = $('review');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'review';
-    box.className = 'review';
-    $('ocr-status').after(box);   // sits just below the file picker
-  }
-  box.innerHTML = '';
 
-  const head = document.createElement('p');
-  head.className = 'hint';
-  head.textContent = statusText;
-  box.appendChild(head);
-
-  if (!suggestions.length) return;
-
-  box.appendChild(makeButton('Approve all single-field suggestions', () => {
-    suggestions = suggestions.filter(s => {
-      if (s.targets.length === 1) { applyValue(s.targets[0], s.value); return false; }
-      return true;
-    });
-    renderReview('Approved. Check the form below, then tap Save.');
-  }));
-
-  suggestions.forEach((s, i) => {
-    const card = document.createElement('div');
-    card.className = 'sugg';
-
-    const strong = document.createElement('strong');
-    strong.textContent = s.targets.map(t => FIELD_LABELS[t]).join(' or ') + ': ' + s.value;
-    const src = document.createElement('small');
-    src.textContent = 'Found in: "' + s.snippet + '"';
-    card.append(strong, src);
-
-    const row = document.createElement('div');
-    row.className = 'row';
-    if (s.targets.length > 1) {
-      // Unknown date: let the user choose which field it belongs to
-      for (const t of s.targets) {
-        row.appendChild(makeButton('Use as ' + FIELD_LABELS[t].toLowerCase(), () => {
-          applyValue(t, s.value);
-          suggestions.splice(i, 1);
-          renderReview('Applied. Check the form below, then tap Save.');
-        }));
-      }
-    } else {
-      const t = s.targets[0];
-      row.appendChild(makeButton('Approve', () => {
-        applyValue(t, s.value);
-        suggestions.splice(i, 1);
-        renderReview('Approved. Check the form below, then tap Save.');
-      }));
-      row.appendChild(makeButton('Edit', () => {
-        applyValue(t, s.value);
-        suggestions.splice(i, 1);
-        renderReview('Filled in. Change it in the form below, then tap Save.');
-        $(FIELD_IDS[t]).focus();
-      }, true));
-    }
-    row.appendChild(makeButton('Dismiss', () => {
-      suggestions.splice(i, 1);
-      renderReview(suggestions.length ? 'Dismissed.' : 'No suggestions left. Enter details manually.');
-    }, true));
-    card.appendChild(row);
-    box.appendChild(card);
-  });
-  }
 /* ================= Lists and details ================= */
 function renderList() {
   const q = $('search').value.trim().toLowerCase();
@@ -841,10 +727,7 @@ function extractPersonName(text) {
 }
 
 // Finds an Indian-style vehicle registration number, e.g. MH12AB1234
-function extractVehicleNo(text) {
-  const m = text.match(/\b[A-Z]{2}[\s-]?\d{1,2}[\s-]?[A-Z]{1,3}[\s-]?\d{4}\b/);
-  return m ? m[0].replace(/[\s-]/g, '').toUpperCase() : null;
-}
+
 
 // Finds a document number, preferring one labelled "Policy No" or similar
 function extractNumber(text) {
@@ -860,52 +743,7 @@ function extractNumber(text) {
 }
 
 // Builds suggestions: title, type, number, and dates for review
-function buildSuggestions(text) {
-  const out = [];
-  const seen = new Set();
-  const snip = (idx, len) =>
-    text.slice(Math.max(0, idx - 30), idx + len + 10).replace(/\s+/g, ' ').trim();
-  const add = (targets, value, snippet) => {
-    const k = targets.join() + '|' + value;
-    if (!value || seen.has(k) || out.length >= 12) return;
-    seen.add(k);
-    out.push({ targets, value, snippet });
-  };
 
-  const rule = DOC_RULES.find(r => r.re.test(text));
-  const person = extractPersonName(text);
-  const vehicle = extractVehicleNo(text);
-  const number = extractNumber(text);
-
-  if (rule) {
-    const m = text.match(rule.re);
-    const sn = snip(m.index, m[0].length);
-
-    // Subject: vehicle number for vehicle documents, person name for personal documents
-    let subject = null;
-    if (rule.vehicle && vehicle) subject = vehicle;
-    else if (rule.person && person) subject = person;
-
-    const title = subject ? `${rule.kind} - ${subject}` : rule.kind;
-    add(['title'], title, sn);
-    add(['type'], rule.type, sn);
-
-    // Number: policy/document number first; vehicle documents fall back to vehicle number
-    const num = number || (rule.vehicle ? vehicle : null);
-    if (num) add(['number'], num, sn);
-  }
-
-  // Dates: label decides expiry or issue; dates near "birth" or "DOB" are skipped
-  for (const d of findDates(text)) {
-    const before = text.slice(Math.max(0, d.idx - 30), d.idx).toLowerCase();
-    if (/birth|\bdob\b|d\.o\.b/.test(before)) continue;
-    const sn = snip(d.idx, d.len);
-    if (EXPIRY_HINT.test(before)) add(['expiry'], d.value, sn);
-    else if (ISSUE_HINT.test(before)) add(['issue'], d.value, sn);
-    else add(['issue', 'expiry'], d.value, sn);
-  }
-  return out;
-                                                 }
 /* ================= Vehicle number reader (replaces older extractVehicleNo) ================= */
 
 const INDIAN_STATE_CODES = new Set([
@@ -920,26 +758,7 @@ const fixAsDigits = s => s.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g
 
 // Finds a vehicle registration number, ignoring spaces, hyphens and dots
 // Examples accepted: MH12AB1234, MH 12 AB 1234, MH-12-AB-1234, MH12 AB1234, 22BH1234AA
-function extractVehicleNo(text) {
-  const clean = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-  // Bharat (BH) series, e.g. 22BH1234AA
-  const bh = clean.match(/(\d{2})BH([0-9OILSB]{4})([A-Z]{1,2})/);
-  if (bh) return `${bh[1]}BH${fixAsDigits(bh[2])}${bh[3]}`;
-
-  // Standard format: state (2 letters), district (1-2 digits), series (1-3 letters), number (4 digits)
-  // Lookahead lets overlapping candidates be checked one by one
-  const re = /(?=([A-Z0-9]{2})([0-9OILSB]{1,2})([A-Z0-9]{1,3})([0-9OILSB]{4}))/g;
-  for (const m of clean.matchAll(re)) {
-    const state = fixAsLetters(m[1]);
-    if (!INDIAN_STATE_CODES.has(state)) continue;
-    const district = fixAsDigits(m[2]).padStart(2, '0');
-    const series = fixAsLetters(m[3]);
-    const number = fixAsDigits(m[4]);
-    return `${state}${district}${series}${number}`;
-  }
-  return null;
-                   }
 /* ================= Vehicle number and date pairing (replaces older versions) ================= */
 
 // Labels that usually sit just before a vehicle number
@@ -1008,48 +827,7 @@ function buildDates(text) {
 }
 
 // Builds suggestions for the review panel
-function buildSuggestions(text) {
-  const out = [];
-  const seen = new Set();
-  const snip = (idx, len) =>
-    text.slice(Math.max(0, idx - 30), idx + len + 10).replace(/\s+/g, ' ').trim();
-  const add = (targets, value, snippet) => {
-    const k = targets.join() + '|' + value;
-    if (!value || seen.has(k) || out.length >= 12) return;
-    seen.add(k);
-    out.push({ targets, value, snippet });
-  };
 
-  const rule = DOC_RULES.find(r => r.re.test(text));
-  const person = extractPersonName(text);
-  const vehicle = extractVehicleNo(text);
-  const number = extractNumber(text);
-
-  if (rule) {
-    const m = text.match(rule.re);
-    const sn = snip(m.index, m[0].length);
-
-    let subject = null;
-    if (rule.vehicle && vehicle) subject = vehicle;
-    else if (rule.person && person) subject = person;
-
-    // If no vehicle number was read, show the text near the vehicle/registration words so you can see why
-    let titleSnippet = sn;
-    if (rule.vehicle && !vehicle) {
-      const vi = text.search(/vehicle|registration|reg\.?\s*no|regn/i);
-      titleSnippet = vi >= 0 ? snip(vi, 40) : 'No vehicle number found in the photo. Add it in the Title field.';
-    }
-
-    add(['title'], subject ? `${rule.kind} - ${subject}` : rule.kind, titleSnippet);
-    add(['type'], rule.type, sn);
-
-    const num = number || (rule.vehicle ? vehicle : null);
-    if (num) add(['number'], num, sn);
-  }
-
-  for (const d of buildDates(text)) add(d.targets, d.value, d.snippet);
-  return out;
-                                 }
 /* ================= Smart picker v2 (part 1: reading the text) ================= */
 
 const VALID_STATES = new Set([

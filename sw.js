@@ -1,20 +1,40 @@
-const CACHE = 'vault-v3';   // bump on every release
+// Keep this name unique to Secure Vault. Bump it when releasing an update.
+const CACHE = 'secure-vault-v4';
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
-const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
+const APP_SHELL = [
+  './',
+  'index.html',
+  'style.css',
+  'app.js',
+  'picker.js',
+  'vault2.js',
+  'vault2-ui.js',
+  'smart.js',
+  'ui.js',
+  'issuer.js',
+  'issuer2.js',
+  'docs2.js',
+  'backup.js',
+  'profile-click.js',
+  'manifest.json',
+  'icon.svg'
+];
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
-    await cache.addAll(SHELL);
-    self.skipWaiting();
+    await cache.addAll(APP_SHELL);
+    await self.skipWaiting();
   })());
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
-    for (const name of await caches.keys()) {
-      if (name !== CACHE) await caches.delete(name);
-    }
+    // Do not delete caches belonging to other sites on the same origin.
+    const names = await caches.keys();
+    await Promise.all(names
+      .filter(name => name.startsWith('secure-vault-') && name !== CACHE)
+      .map(name => caches.delete(name)));
     await self.clients.claim();
   })());
 });
@@ -22,38 +42,41 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const req = event.request;
   if (req.method !== 'GET') return;
+
   const url = new URL(req.url);
   if (url.origin === self.location.origin) {
-    event.respondWith(networkFirst(req));   // your own files: fresh when online
+    event.respondWith(networkFirst(req));
   } else if (CDN_HOSTS.includes(url.hostname)) {
-    event.respondWith(cacheFirst(req));     // libraries: keep after first download
+    event.respondWith(cacheFirst(req));
   }
 });
 
-// Your app files: use the network if online, otherwise the saved copy
+// Prefer fresh app files online; use the saved version offline.
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
   try {
-    const res = await fetch(req);
-    if (res.ok) cache.put(req, res.clone()).catch(() => {});
-    return res;
+    const response = await fetch(req);
+    if (response.ok) cache.put(req, response.clone()).catch(() => {});
+    return response;
   } catch {
-    const hit = await cache.match(req);
-    if (hit) return hit;
+    const saved = await cache.match(req);
+    if (saved) return saved;
     if (req.mode === 'navigate') return cache.match('index.html');
     return Response.error();
   }
 }
 
-// Libraries from the CDN: use the saved copy if present, otherwise download and save
+// Reuse downloaded third-party libraries when offline.
 async function cacheFirst(req) {
   const cache = await caches.open(CACHE);
-  const hit = await cache.match(req);
-  if (hit) return hit;
+  const saved = await cache.match(req);
+  if (saved) return saved;
   try {
-    const res = await fetch(req);
-    if (res.ok || res.type === 'opaque') cache.put(req, res.clone()).catch(() => {});
-    return res;
+    const response = await fetch(req);
+    if (response.ok || response.type === 'opaque') {
+      cache.put(req, response.clone()).catch(() => {});
+    }
+    return response;
   } catch {
     return Response.error();
   }

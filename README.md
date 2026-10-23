@@ -15,6 +15,6 @@ Open http://localhost:8000 in Chrome.
 
 ## Updating
 1. Change the code.
-2. Change CACHE in sw.js (e.g. 'vault-v2').
+2. Bump CACHE in sw.js (e.g. 'secure-vault-v5') for each release.
 3. Commit and push.
 4. Open the app online once and reload.
