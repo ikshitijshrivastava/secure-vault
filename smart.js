@@ -241,3 +241,248 @@ function smLabelDate(src, isEnd) {
     ? (isEnd ? 'Month only, set to last day' : 'Month only, set to 1st day') : '';
   return { iso: smIso(p, isEnd), src, note };
 }
+/* ===== smart.js PART 2 of 2. Append to the end. Builds suggestions, prepares photos, runs the tests. ===== */
+
+/* ---------- 7. Numbers ---------- */
+// Keeps a number that may contain spaces, such as "0157681764 09 00"
+function smNumberTokens(x) {
+  const toks = [];
+  for (const t of x.value.split(/\s+/)) {
+    if (!t) continue;
+    if (!/^[A-Za-z0-9\/\-]+$/.test(t) || !/\d/.test(t)) break;
+    toks.push(t.toUpperCase());
+    if (toks.length === 4) break;
+  }
+  return toks.join(' ');
+}
+
+/* ---------- 8. Other details (kept as one Notes suggestion) ---------- */
+function smOtherDetails(T, v) {
+  const extra = [];
+  if (v.dob) {
+    const d = smDates(v.dob.value.slice(0, 30))[0];
+    if (d) extra.push('Date of birth: ' + smShow(smIso(d.p, false)));
+  }
+  if (v.father) { const n = smName(v.father.value); if (n) extra.push('Father/Husband: ' + n); }
+  if (v.sex) extra.push('Sex: ' + v.sex.value.slice(0, 12));
+  if (v.age) {
+    const a = /(\d{1,3})\s*(?:years?|yrs?)\b/i.exec(v.age.value);
+    if (a) extra.push('Age: ' + a[1] + ' years');
+  }
+  if (v.blood) extra.push('Blood group: ' + v.blood.value.slice(0, 4));
+  if (v.designation) extra.push('Designation: ' + v.designation.value.slice(0, 50));
+  if (v.course) extra.push('Course/class: ' + v.course.value.slice(0, 50));
+  if (v.address) extra.push('Address: ' + v.address.value.slice(0, 90));
+  if (v.purpose) { const p = smPurpose(v.purpose.value); if (p) extra.push('Purpose: ' + p); }
+  if (v.vdetail) extra.push('Vehicle: ' + v.vdetail.value.slice(0, 40));
+  if (v.amount) extra.push('Amount: ' + v.amount.value.slice(0, 40));
+  const iss = /(?:issued\s+by|conducted\s+by|offered\s+by|issued\s+from|from)\s+((?:[A-Z][\w&.\-]*\s*){1,6})/.exec(T);
+  if (iss && /institute|university|college|school|board|council|department|ministry|bank|limited|ltd|academy|company|corporation|authority|commission|government|insurance/i.test(iss[1])) {
+    extra.push('Issued by: ' + iss[1].trim());
+  }
+  return extra;
+}
+
+/* ---------- 9. The main builder ---------- */
+function smBuild(text) {
+  const T = smClean(text);
+  const kind = smKind(T);
+  PK_LAST = kind ? kind.kind : null;
+  const v = smValues(T, smFindLabels(T));
+  const out = [];
+  const add = (targets, value, snippet, note) => {
+    if (!value || out.length >= 14) return;
+    if (out.some(s => s.value === value && s.targets.join() === targets.join())) return;
+    out.push({ targets, value, snippet: snippet || '', note: note || '' });
+  };
+  const snip = (idx, len) =>
+    T.slice(Math.max(0, idx - 25), idx + len + 25).replace(/\s+/g, ' ').trim().slice(0, 120);
+  const vsnip = x => snip(x.idx, Math.min(40, x.end - x.idx + 25));
+
+  // Title and type
+  const isVehicle = !!(kind && kind.vehicle);
+  const isPerson = !!(kind && kind.person);
+  const veh = isVehicle ? pkVehicle(T) : null;
+  let person = isPerson && v.name ? { value: smName(v.name.value), idx: v.name.idx } : null;
+  if (isPerson && (!person || !person.value)) person = smPersonFallback(T);
+  let subject = '', subSn = '', subNote = '';
+  if (isVehicle) {
+    if (veh) { subject = veh.value; subSn = snip(Math.max(0, veh.idx), 14); subNote = 'Vehicle no.'; }
+    else subNote = 'Vehicle no. not found, add it in Title';
+  } else if (isPerson) {
+    if (person && person.value) { subject = person.value; subSn = snip(person.idx, 30); subNote = 'Name'; }
+    else subNote = 'Name not found, add it in Title';
+  }
+  const kindName = kind ? kind.kind : (smHeading(T) || 'Document');
+  const titleText = subject ? kindName + ' - ' + subject : kindName;
+  add(['title'], titleText, subSn || snip(0, 60), subNote || (kind ? '' : 'Heading guessed, check it'));
+  add(['type'], kind ? kind.type : 'Other', '', 'Document type');
+
+  // Number, chosen by document kind
+  const k = kind ? kind.kind : '';
+  let num = null;
+  if (k === 'Driving licence') {
+    const sq = v.nlicence ? /^([A-Z]{2})(\d{2})(\d{11})/.exec(v.nlicence.value.toUpperCase().replace(/[^A-Z0-9]/g, '')) : null;
+    if (sq) num = { value: sq[1] + sq[2] + sq[3], idx: v.nlicence.idx, label: 'Licence no.' };
+    else { const p = pkDlNumber(T); if (p) num = { value: p.value, idx: p.idx, label: 'Licence no.' }; }
+  } else if (k === 'Voter ID card') {
+    const m = /\b[A-Z]{3}\d{7}\b/.exec(T);
+    if (m) num = { value: m[0], idx: m.index, label: 'Voter ID (EPIC) no.' };
+  } else if (k === 'Passport') {
+    const m = /\b[A-Z]\d{7}\b/.exec(T);
+    if (m) num = { value: m[0], idx: m.index, label: 'Passport no.' };
+  } else if (k === 'Aadhaar card') {
+    const m = /\b(\d{4})\s?(\d{4})\s?(\d{4})\b/.exec(T);
+    if (m) num = { value: m[1] + ' ' + m[2] + ' ' + m[3], idx: m.index, label: 'Aadhaar no.' };
+  } else if (k === 'PAN card') {
+    const m = /\b[A-Z]{5}\d{4}[A-Z]\b/.exec(T);
+    if (m) num = { value: m[0], idx: m.index, label: 'PAN' };
+  } else if (isVehicle) {
+    if (v.npolicy && smNumberTokens(v.npolicy)) num = { value: smNumberTokens(v.npolicy), idx: v.npolicy.idx, label: 'Policy no.' };
+    else if (veh) num = { value: veh.value, idx: Math.max(0, veh.idx), label: 'Vehicle no.' };
+  } else {
+    const L = [v.npolicy, v.nother, v.nvehicle].find(x => x && smNumberTokens(x));
+    if (L) num = { value: smNumberTokens(L), idx: L.idx, label: 'Document no.' };
+  }
+  if (num) add(['number'], num.value, snip(num.idx, 30), num.label);
+
+  // Dates: policy period for insurance, labelled dates otherwise, then unlabelled dates
+  const insuranceLike = isVehicle || ['Life insurance', 'Health insurance', 'Insurance policy'].includes(k);
+  const period = insuranceLike ? pkPeriod(T) : null;
+  if (period) {
+    add(['issue'], period.from.value, snip(period.from.idx, 12), 'Policy start');
+    add(['expiry'], period.till.value, snip(period.till.idx, 12), 'Policy end');
+  } else {
+    const dIssue = smLabelDate(v.issue || v.appoint || v.validfrom || v.date, false);
+    const dExpiry = smLabelDate(v.expiry, true);
+    if (dIssue) add(['issue'], dIssue.iso, vsnip(dIssue.src), dIssue.note);
+    if (dExpiry) add(['expiry'], dExpiry.iso, vsnip(dExpiry.src), dExpiry.note);
+    if (!dIssue && !dExpiry) {
+      smDates(T)
+        .filter(d => !SM_NOT_DATE.test(T.slice(Math.max(0, d.idx - 40), d.idx)))
+        .slice(0, 3)
+        .forEach(d => add(['issue', 'expiry'], smIso(d.p, false), snip(d.idx, d.end - d.idx), 'Check which date this is'));
+    }
+  }
+
+  // Other details, as one suggestion for the Notes field
+  const extra = smOtherDetails(T, v);
+  if (extra.length) add(['notes'], extra.join(' · ').slice(0, 400), snip(0, 60), 'Other details (approve to add to notes)');
+
+  return out;
+}
+
+// The form and the tests use this name
+buildSuggestions = smBuild;
+
+/* ---------- 10. Photos: enlarge small text and stretch contrast before OCR ---------- */
+async function smPrepare(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error('the photo could not be opened'));
+      i.src = url;
+    });
+    const scale = Math.min(2.5, 2200 / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h);
+    const px = data.data;
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < px.length; i += 4) {
+      const g = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
+      px[i] = px[i + 1] = px[i + 2] = g;
+      hist[g]++;
+    }
+    const total = w * h;
+    let lo = 0, hi = 255, acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > total * 0.02) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > total * 0.02) { hi = v; break; } }
+    const span = Math.max(1, hi - lo);
+    for (let i = 0; i < px.length; i += 4) {
+      const g = Math.max(0, Math.min(255, Math.round((px[i] - lo) * 255 / span)));
+      px[i] = px[i + 1] = px[i + 2] = g;
+    }
+    ctx.putImageData(data, 0, 0);
+    return await new Promise(res => canvas.toBlob(res, 'image/png'));
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// Photos now go through the preparation step; PDFs keep the existing path
+const smBaseReadDocument = readDocument;
+readDocument = async function (file) {
+  if (!file.type || !file.type.startsWith('image/')) return smBaseReadDocument(file);
+  if (!(await pkLoadOcr())) return { error: 'Could not load the OCR engine. Check internet and try again.' };
+  const prepared = await smPrepare(file);
+  return { text: await pkOcrBlob(prepared, true) };
+};
+
+/* ---------- 11. Tests on your card text and a non-standard certificate ---------- */
+const SM_VOTER_SAMPLE = "ELECTION COMMISSION OF INDIA IDENTITY CARD GDH9779703 Elector's Name :LALEET Father's Name :HARKISHOR Sex / MALE Age as on 1.1.2003 :66 Years Address : HNO. 3106/2 COLLEGE WARD Date : 10-02-2003";
+const SM_COLLEGE_SAMPLE = "GOVERNMENT MODEL COLLEGE OF SCIENCE RAIPUR IDENTITY CARD S. No. Name LALIT KUMAR SRIVASTAVA Father/Husband Name SRI H.K. SRIVASTAVA Date of Birth 15.10.1938 Designation PROFESSOR PHYSICS Bearer Principal";
+const SM_CERT_SAMPLE = "CERTIFICATE OF PARTICIPATION\nThis is to certify that Priya Sharma has successfully completed the Advanced Python Workshop conducted by Tech Institute Bangalore for the purpose of professional development.\nDate of Issue: 14th March 2024   Valid Upto: Mar 2026   Certificate No. TI/2024/0456";
+
+const SM_TESTS = [
+  { name: 'Driving licence (your card text)', text: PK_DL_SAMPLE,
+    expect: { title: 'Driving licence - Kshitij Shrivastava', type: 'Identity', number: 'MH1320090023095', issue: '2009-07-02', expiry: '2034-08-10' },
+    contains: { notes: 'Date of birth' }, absent: [] },
+  { name: 'Car insurance (policy PDF text)', text: PK_CAR_SAMPLE,
+    expect: { title: 'Car insurance - WB06L2307', type: 'Insurance', number: '0157681764 09 00', issue: '2026-10-30', expiry: '2027-10-29' },
+    contains: {}, absent: [] },
+  { name: 'Voter ID (photo text)', text: SM_VOTER_SAMPLE,
+    expect: { title: 'Voter ID card - Laleet', type: 'Identity', number: 'GDH9779703', issue: '2003-02-10' },
+    contains: {}, absent: ['expiry'] },
+  { name: 'College ID (handwritten, no expiry)', text: SM_COLLEGE_SAMPLE,
+    expect: { title: 'College ID card - Lalit Kumar Srivastava', type: 'Identity' },
+    contains: {}, absent: ['number', 'issue', 'expiry'] },
+  { name: 'Certificate (non-standard wording)', text: SM_CERT_SAMPLE,
+    expect: { title: 'Certificate - Priya Sharma', type: 'Certificate', number: 'TI/2024/0456', issue: '2024-03-14', expiry: '2026-03-31' },
+    contains: { notes: 'professional development' }, absent: [] }
+];
+
+function smSelfTest() {
+  const lines = [];
+  for (const t of SM_TESTS) {
+    const got = smBuild(t.text);
+    const pick = key => got.find(s => s.targets.length === 1 && s.targets[0] === key);
+    lines.push('-- ' + t.name + ' (detected: ' + (PK_LAST || 'none') + ')');
+    for (const key of Object.keys(t.expect)) {
+      const s = pick(key);
+      const ok = !!s && s.value === t.expect[key];
+      lines.push((ok ? 'PASS  ' : 'FAIL  ') + key + ': ' + (s ? s.value : 'nothing found') +
+        (ok ? '' : '  (expected ' + t.expect[key] + ')'));
+    }
+    for (const [key, part] of Object.entries(t.contains)) {
+      const s = pick(key);
+      const ok = !!s && s.value.includes(part);
+      lines.push((ok ? 'PASS  ' : 'FAIL  ') + key + ' includes "' + part + '"');
+    }
+    for (const key of t.absent) {
+      const s = pick(key);
+      lines.push((s ? 'FAIL  ' : 'PASS  ') + 'no ' + key + (s ? ' (got ' + s.value + ')' : ''));
+    }
+  }
+  alert('Smart reader tests\n\n' + lines.join('\n'));
+}
+
+(function smButton() {
+  const bk = document.querySelector('.backup');
+  if (!bk || document.getElementById('sm-test')) return;
+  const b = document.createElement('button');
+  b.id = 'sm-test';
+  b.type = 'button';
+  b.className = 'ghost';
+  b.textContent = 'Run smart reader tests';
+  b.onclick = smSelfTest;
+  bk.appendChild(b);
+})();
