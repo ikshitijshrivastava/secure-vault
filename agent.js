@@ -205,3 +205,213 @@ function agIssuer(raw) {
   if (/^(of|the|and|for|by)\b/i.test(v)) return null;
   return v;
                              }
+/* ===== agent.js PART 2 of 2. Append to the end. Builds suggestions, merges them with the reader, runs tests. ===== */
+
+const AG_MAXPIECES = { holder: 5, father: 5, address: 12, issuer: 10, notes: 10, amount: 4 };
+
+// Reads the text into lines, pieces and labels
+function agDoc(text) {
+  return String(text || '').replace(/\r/g, '').split('\n').map(l => l.trim()).filter(Boolean).map(line => {
+    const pieces = agPieces(line);
+    const labels = agLabelsIn(pieces);
+    return { line, pieces, labels, stops: new Set(labels.map(l => l.from)) };
+  });
+}
+
+// Value for a label: the same line first, or the next line when the label ends its line
+function agTake(docLines, li, label) {
+  const dl = docLines[li];
+  const max = AG_MAXPIECES[label.field] || 8;
+  let raw = agCollect(dl.pieces, label.to + 1, dl.stops, max);
+  let source = 'same line';
+  if (!raw && li + 1 < docLines.length && !docLines[li + 1].stops.has(0)) {
+    const nx = docLines[li + 1];
+    raw = agCollect(nx.pieces, 0, nx.stops, max);
+    source = 'next line';
+  }
+  return { raw, source };
+}
+
+// Builds candidate values for each field, with confidence and the label they came from
+function agBuild(text) {
+  const T = String(text || '');
+  const docLines = agDoc(T);
+  const kind = smKind(smClean(T));
+  PK_LAST = kind ? kind.kind : null;
+
+  const got = {};
+  const put = (field, value, conf, why, snippet) => {
+    if (value) (got[field] = got[field] || []).push({ value, conf, why, snippet });
+  };
+
+  docLines.forEach((dl, li) => {
+    for (const label of dl.labels) {
+      const take = agTake(docLines, li, label);
+      if (!take.raw) continue;
+      const shown = dl.pieces.slice(label.from, label.to + 1).map(p => p.raw).join(' ');
+      const why = '"' + shown + '" (' + take.source + ')';
+      const snippet = (shown + ': ' + take.raw).slice(0, 110);
+      const base = (label.exact ? 0.9 : 0.75) - (take.source === 'next line' ? 0.1 : 0);
+      const f = label.field;
+      if (f === 'holder' || f === 'father') {
+        put(f, agName(take.raw), base, why, snippet);
+      } else if (f === 'dob' || f === 'issue' || f === 'validfrom' || f === 'expiry') {
+        const role = f === 'validfrom' ? 'issue' : f;
+        const d = agDateOf(take.raw, role);
+        if (d) put(role, d.iso, base - (d.precision === 'month' ? 0.1 : 0),
+          why + (d.precision === 'month' ? ', month only' : ''), snippet);
+      } else if (f === 'number') {
+        put('number', agNumber(take.raw), base, why, snippet);
+      } else if (f === 'vehicle') {
+        put('vehicle', pkVehicleFromSquashed(take.raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20)), base, why, snippet);
+      } else if (f === 'issuer') {
+        put('issuer', agIssuer(take.raw), base, why, snippet);
+      } else {
+        put(f, take.raw.slice(0, f === 'address' ? 120 : 80).trim(), base - 0.1, why, snippet);
+      }
+    }
+  });
+
+  const best = f => (got[f] || []).slice().sort((a, b) => b.conf - a.conf)[0] || null;
+  const out = [];
+  const add = (targets, value, snippet, conf, why) => {
+    if (!value) return;
+    const pct = Math.round(Math.min(1, Math.max(0, conf)) * 100);
+    out.push({ targets, value, snippet: snippet || '', note: 'Agent ' + pct + '% · ' + why });
+  };
+
+  // Vehicle and name, used in the title
+  let veh = best('vehicle');
+  if (!veh && kind && kind.vehicle) {
+    const p = pkVehicle(T);
+    if (p) veh = { value: p.value, conf: 0.6, why: 'vehicle number found in the text', snippet: '' };
+  }
+  const holder = best('holder');
+
+  if (kind) {
+    const subject = kind.vehicle ? veh : (kind.person ? holder : null);
+    add(['title'], kind.kind + (subject ? ' - ' + subject.value : ''),
+      subject ? subject.snippet : '', subject ? Math.min(0.95, subject.conf) : 0.5,
+      subject ? (kind.vehicle ? 'document kind and vehicle number' : 'document kind and name')
+              : 'document kind, no name or vehicle number found');
+    add(['type'], kind.type, '', 0.9, 'document kind');
+  }
+
+  const numC = best('number') || (kind && kind.vehicle ? veh : null);
+  if (numC) add(['number'], numC.value, numC.snippet, numC.conf, numC.why);
+
+  for (const f of ['issue', 'expiry']) {
+    const c = best(f);
+    if (c) add([f], c.value, c.snippet, c.conf, c.why);
+  }
+
+  const iss = best('issuer');
+  if (iss) add(['issuer'], iss.value, iss.snippet, iss.conf, iss.why);
+  else {
+    const fb = typeof ssIssuer === 'function' ? ssIssuer(T) : null;
+    if (fb) add(['issuer'], fb.value, fb.snippet, 0.5, 'pattern match, please check');
+  }
+
+  // Other details, one line each, for the Other details field
+  const lines = [];
+  const dob = best('dob');
+  if (dob) lines.push('Date of birth: ' + smShow(dob.value));
+  const fa = best('father');
+  if (fa) lines.push('Father/Husband: ' + fa.value);
+  const extras = [['sex', 'Sex'], ['age', 'Age'], ['blood', 'Blood group'], ['designation', 'Designation'],
+    ['course', 'Course/class'], ['address', 'Address'], ['purpose', 'Purpose'], ['amount', 'Amount']];
+  for (const [f, label] of extras) {
+    const c = best(f);
+    if (c) lines.push(label + ': ' + c.value);
+  }
+  if (lines.length) add(['notes'], lines.join('\n'), '', 0.7, 'other details');
+
+  return out;
+}
+
+// Replaces the suggestion builder: agent results come first, the older readers fill any gaps
+const agBaseBuild = buildSuggestions;
+buildSuggestions = function (text) {
+  let ag = [];
+  try { ag = agBuild(text); } catch (e) { ag = []; }
+  const taken = new Set();
+  const out = [];
+  for (const s of ag) {
+    if (s.targets.some(t => taken.has(t))) continue;
+    s.targets.forEach(t => taken.add(t));
+    out.push(s);
+  }
+  for (const s of agBaseBuild(text)) {
+    const free = s.targets.filter(t => !taken.has(t));
+    if (!free.length) continue;
+    free.forEach(t => taken.add(t));
+    out.push({ ...s, targets: free });
+  }
+  return out;
+};
+
+/* ---------- tests: different phrasings, layouts and a negative case ---------- */
+const AG_TESTS = [
+  { name: '1. Different wording: "Holder\'s full name", "Valid up to"',
+    text: "Holder's full name: Ananya Rao\nDate of Birth: 04-07-1990\nValid up to: 03.07.2030\nPolicy Number: AB/2291/77",
+    expect: { holder: 'Ananya Rao', expiry: '2030-07-03', number: 'AB/2291/77' },
+    contains: { notes: 'Date of birth: 04/07/1990' }, absent: [] },
+  { name: '2. Name on the line below its label',
+    text: 'Name of the Insured\nSHRI RAJESH KUMAR\nDate of Issue : 14th March 2024',
+    expect: { holder: 'Rajesh Kumar', issue: '2024-03-14' }, contains: {}, absent: [] },
+  { name: '3. Table layout with bars',
+    text: 'Policy No | 0157681764 09 00\nValid From | 30/10/2026\nValid Till | 29/10/2027',
+    expect: { number: '0157681764 09 00', issue: '2026-10-30', expiry: '2027-10-29' }, contains: {}, absent: [] },
+  { name: '4. Marksheet with board, roll number and year',
+    text: 'Board : Maharashtra State Board\nRoll No : MH4451234\nStudent Name : Priya Patil\nYear of Passing : March 2019',
+    expect: { issuer: 'Maharashtra State Board', number: 'MH4451234', holder: 'Priya Patil', issue: '2019-03-01' },
+    contains: {}, absent: [] },
+  { name: '5. Label with no colon, and other details',
+    text: "Ananya's date of birth 04/07/1990 Blood group B+",
+    expect: {}, contains: { notes: 'Date of birth: 04/07/1990', notes2: '' }, absent: [] },
+  { name: '6. "Name of Institution" and a bare "Name" line',
+    text: 'Name of Institution: GOVERNMENT MODEL COLLEGE OF SCIENCE RAIPUR\nIDENTITY CARD\nName LALIT KUMAR SRIVASTAVA',
+    expect: { issuer: 'GOVERNMENT MODEL COLLEGE OF SCIENCE RAIPUR', holder: 'Lalit Kumar Srivastava' },
+    contains: {}, absent: [] },
+  { name: '7. Legal wording must not become an issuer',
+    text: 'Chapter 7 of the IRDAI (Protection of Policyholders Interests, Operations and Allied Matters of Insurers) Regulations, 2024.',
+    expect: {}, contains: {}, absent: ['issuer'] }
+];
+
+function agSelfTest() {
+  const lines = [];
+  for (const t of AG_TESTS) {
+    const got = agBuild(t.text);
+    const pick = f => got.find(s => s.targets.length === 1 && s.targets[0] === f);
+    lines.push('-- ' + t.name);
+    for (const [f, want] of Object.entries(t.expect || {})) {
+      const s = pick(f);
+      const ok = !!s && s.value === want;
+      lines.push((ok ? 'PASS  ' : 'FAIL  ') + f + ': ' + (s ? s.value : 'nothing found') +
+        (ok ? '' : '  (expected ' + want + ')'));
+    }
+    for (const [f, part] of Object.entries(t.contains || {})) {
+      if (f === 'notes2') continue;
+      const s = pick(f);
+      const ok = !!s && s.value.includes(part);
+      lines.push((ok ? 'PASS  ' : 'FAIL  ') + f + ' includes "' + part + '"' + (ok ? '' : '  (got ' + (s ? s.value : 'nothing') + ')'));
+    }
+    for (const f of t.absent || []) {
+      const s = pick(f);
+      lines.push((s ? 'FAIL  ' : 'PASS  ') + 'no ' + f + (s ? ' (got ' + s.value + ')' : ''));
+    }
+  }
+  alert(AG_VERSION + ' tests\n\n' + lines.join('\n'));
+}
+
+(function agButton() {
+  const bk = document.querySelector('.backup');
+  if (!bk || document.getElementById('ag-test')) return;
+  const b = document.createElement('button');
+  b.id = 'ag-test';
+  b.type = 'button';
+  b.className = 'ghost';
+  b.textContent = 'Run agent tests';
+  b.onclick = agSelfTest;
+  bk.appendChild(b);
+})();
