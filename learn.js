@@ -132,3 +132,151 @@ async function lnLearnFromSave(doc, persist) {
   }
   return changed;
     }
+/* ===== learn.js PART 2 of 2. Append to the end. Connects learning to the form, loads it on unlock, screen, tests. ===== */
+
+// Remember the suggestions and text of the form currently on screen
+const lnBaseBuild = buildSuggestions;
+buildSuggestions = function (text) {
+  const out = lnBaseBuild(text);
+  LN_LAST = {
+    text: String(text || ''),
+    sugg: out
+      .filter(s => /Agent \d+%/.test(s.note || ''))
+      .map(s => ({ ...s, label: lnLabelOf(s.note) }))
+      .filter(s => s.label)
+  };
+  return out;
+};
+
+// Learn when a document is saved from the form
+const lnBaseV2Put = v2Put;
+v2Put = async function (store, obj) {
+  const result = await lnBaseV2Put(store, obj);
+  if (store === 'docs' && obj && LN_LAST.text) {
+    try { await lnLearnFromSave(obj, true); } catch (e) { /* learning never blocks a save */ }
+    LN_LAST = { text: '', sugg: [] };
+  }
+  return result;
+};
+
+// Leaving the form forgets the form's text, so nothing is learned from the wrong document
+const lnBaseGo = vuGo;
+vuGo = async function (tab, arg) {
+  if (tab !== 'form') LN_LAST = { text: '', sugg: [] };
+  return lnBaseGo(tab, arg);
+};
+
+// Load what has been learned as soon as the vault unlocks
+const lnBaseEnter = enterApp;
+enterApp = function () {
+  lnLoad().catch(() => {});
+  lnBaseEnter();
+};
+
+/* ---------- learned wording: show and reset ---------- */
+function lnDescribe() {
+  const rows = [];
+  for (const [label, fields] of Object.entries(LN_DATA.labels || {})) {
+    for (const [field, c] of Object.entries(fields)) {
+      const active = c.good >= 1 && c.good - c.bad > 0;
+      rows.push((active ? 'USED  ' : 'off   ') + '"' + label + '" -> ' + field +
+        '  (good ' + c.good + ', bad ' + c.bad + ')');
+    }
+  }
+  return rows;
+}
+function lnScreen() {
+  const rows = lnDescribe();
+  alert('Learned wording\n\n' + (rows.length
+    ? rows.join('\n') + '\n\nUSED entries are applied to new documents. Reset to clear everything.'
+    : 'Nothing learned yet. Correct a suggestion, or type a value the agent missed, and save the document.'));
+}
+async function lnResetUI() {
+  if (!confirm('Forget everything learned from your corrections?')) return;
+  try { await lnReset(); alert('Learned wording cleared.'); }
+  catch (e) { alert('Reset failed: ' + e.message); }
+}
+
+(function lnButtons() {
+  const bk = document.querySelector('.backup');
+  if (!bk || document.getElementById('ln-show')) return;
+  const show = document.createElement('button');
+  show.id = 'ln-show';
+  show.type = 'button';
+  show.className = 'ghost';
+  show.textContent = 'Learned wording';
+  show.onclick = lnScreen;
+  const reset = document.createElement('button');
+  reset.id = 'ln-reset';
+  reset.type = 'button';
+  reset.className = 'ghost';
+  reset.textContent = 'Reset learned wording';
+  reset.onclick = lnResetUI;
+  bk.append(show, reset);
+})();
+
+/* ---------- tests: change nothing permanent ---------- */
+async function lnSelfTest() {
+  const lines = [];
+  const ok = (c, m) => lines.push((c ? 'PASS  ' : 'FAIL  ') + m);
+  const savedData = JSON.parse(JSON.stringify(LN_DATA));
+  const savedLast = LN_LAST;
+  try {
+    if (!key) throw new Error('unlock the vault first');
+
+    ok(lnLabelFromPrefix('Membership Reference : ') === 'membership reference',
+      'a label is read from the text before a colon');
+    ok(lnLabelFromPrefix('Policy Number ') === 'policy number',
+      'a label with no colon is read from the words before the value');
+    ok(lnLabelFromPrefix('1234 ') === '', 'a bare number is not taken as a label');
+
+    LN_LAST = { text: 'Membership Reference : REF-88-2291\nValid till 03.07.2030', sugg: [] };
+    ok(lnFindLabel('number', 'REF-88-2291') === 'membership reference',
+      'a typed number is linked to the label printed before it');
+    ok(lnFindLabel('expiry', '2030-07-03') === 'valid till',
+      'a typed expiry date is linked to its printed label');
+
+    // Learning: after one good example, the agent reads the new label
+    LN_DATA = { labels: {} };
+    lnBump('membership reference', 'number', 'good');
+    lnActivate();
+    const got = agBuild('Membership Reference : REF-88-2291').find(s => s.targets[0] === 'number');
+    ok(!!got && got.value === 'REF-88-2291', 'after learning, the agent reads "Membership Reference" as the number');
+
+    // A correction moves a value to another field and counts against the old one
+    LN_DATA = { labels: {} };
+    LN_LAST = {
+      text: 'Holder code : ZX-902',
+      sugg: [{ targets: ['number'], value: 'ZX-902', label: 'holder code', snippet: '', note: '' }]
+    };
+    await lnLearnFromSave({ number: '', expiry: 'ZX-902' }, false);
+    const row = LN_DATA.labels['holder code'] || {};
+    ok(!!row.expiry && row.expiry.good === 1, 'a value moved to another field teaches the new field');
+    ok(!!row.number && row.number.bad === 1, 'the rejected field is counted as a bad example');
+
+    // Enough rejections switches a learned label off
+    LN_DATA = { labels: { 'membership reference': { number: { good: 1, bad: 3 } } } };
+    lnActivate();
+    ok(!AG_PHRASES.some(p => p.learned && p.text === 'membership reference'),
+      'a label rejected more often than it was right is not used');
+  } catch (e) {
+    lines.push('FAIL  test stopped: ' + e.message);
+  } finally {
+    LN_DATA = savedData;
+    LN_LAST = savedLast;
+    lnActivate();
+  }
+  alert('Learning tests\n\n' + lines.join('\n'));
+}
+
+(function lnTestButton() {
+  const bk = document.querySelector('.backup');
+  if (!bk || document.getElementById('ln-test')) return;
+  const b = document.createElement('button');
+  b.id = 'ln-test';
+  b.type = 'button';
+  b.className = 'ghost';
+  b.textContent = 'Run learning tests';
+  b.onclick = lnSelfTest;
+  bk.appendChild(b);
+})();
