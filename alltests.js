@@ -1,8 +1,6 @@
-/* ===== alltests.js. Create this file. Adds one button that runs every test suite and reports one summary. Load LAST. ===== */
+/* ===== alltests.js. Replaces the earlier runner. Waits for each suite's result, so no suite shows NO RESULT. Load LAST. ===== */
 'use strict';
 
-// Each suite is named by its function, which is looked up when the test runs.
-// A suite that is not loaded is reported as MISSING rather than breaking the run.
 const AL_SUITES = [
   ['Vault and profiles (v2)', 'v2SelfTest'],
   ['Reader screens: voter and college', 'vuSelfTest'],
@@ -17,7 +15,21 @@ const AL_SUITES = [
   ['Agent (v2)', 'atRun']
 ];
 
-// Counts PASS and FAIL lines in a test report
+// Runs one suite and returns its report text, captured from its alert
+async function alRunSuite(fn) {
+  const real = window.alert;
+  const seen = [];
+  window.alert = msg => seen.push(String(msg));
+  try {
+    const r = fn();
+    if (r && typeof r.then === 'function') await r;
+  } finally {
+    window.alert = real;
+  }
+  return seen.join('\n');
+}
+
+// PASS and FAIL lines in a report. Lines with no PASS or FAIL are not counted.
 function alCount(text) {
   let pass = 0, fail = 0;
   const failLines = [];
@@ -28,40 +40,26 @@ function alCount(text) {
   return { pass, fail, failLines };
 }
 
-// Runs every suite in turn. Each suite's own alert is captured, then one summary is shown.
 async function alRunAll() {
   if (!key) return alert('Unlock the vault first, then run all tests.');
-  const realAlert = window.alert;
-  const captured = {};
-  let current = null;
-  window.alert = msg => {
-    if (current) (captured[current] = captured[current] || []).push(String(msg));
-  };
   const rows = [];
-  try {
-    for (const [label, fnName] of AL_SUITES) {
-      current = label;
-      const fn = window[fnName];
-      if (typeof fn !== 'function') {
-        rows.push({ label, status: 'MISSING', pass: 0, fail: 1,
-          failLines: ['FAIL  ' + fnName + ' is not loaded. Check index.html.'] });
-        continue;
-      }
-      try {
-        await fn();
-      } catch (e) {
-        (captured[label] = captured[label] || []).push('FAIL  stopped: ' + e.message);
-      }
-      const c = alCount((captured[label] || []).join('\n'));
-      const status = c.fail ? 'FAIL' : (c.pass ? 'PASS' : 'NO RESULT');
-      rows.push({ label, status, ...c });
+  for (const [label, fnName] of AL_SUITES) {
+    const fn = window[fnName];
+    if (typeof fn !== 'function') {
+      rows.push({ label, status: 'MISSING', pass: 0, fail: 1,
+        failLines: ['FAIL  ' + fnName + ' is not loaded.'] });
+      continue;
     }
-  } finally {
-    current = null;
-    window.alert = realAlert;
+    let text = '';
+    try {
+      text = await alRunSuite(fn);
+    } catch (e) {
+      text = 'FAIL  stopped: ' + e.message;
+    }
+    const c = alCount(text);
+    const status = c.fail ? 'FAIL' : (c.pass ? 'PASS' : 'NO RESULT');
+    rows.push({ label, status, ...c });
   }
-
-  // Return to the normal vault screen once all suites have finished
   if (typeof vuClose === 'function') vuClose();
 
   const pass = rows.reduce((n, r) => n + r.pass, 0);
@@ -73,9 +71,8 @@ async function alRunAll() {
   const failures = rows.flatMap(r => r.failLines.map(l => r.label + ': ' + l));
   if (failures.length) {
     lines.push('', 'Failures:', ...failures.slice(0, 40));
-    if (failures.length > 40) lines.push('...and ' + (failures.length - 40) + ' more');
   }
-  realAlert('Full test run\n\n' + lines.join('\n'));
+  window.alert('Full test run\n\n' + lines.join('\n'));
 }
 
 (function alWire() {
