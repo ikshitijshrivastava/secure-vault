@@ -17,7 +17,6 @@
 </header>
 
 <main>
-  <!-- First-run setup -->
   <section id="view-setup" class="view hidden">
     <h2>Create your vault</h2>
     <p class="warn">Choose a master password. If you forget it, your data cannot be recovered.</p>
@@ -32,7 +31,6 @@
     </form>
   </section>
 
-  <!-- Unlock -->
   <section id="view-unlock" class="view hidden">
     <h2>Unlock</h2>
     <form id="form-unlock">
@@ -44,7 +42,6 @@
     <p id="unlock-error" class="error hidden"></p>
   </section>
 
-  <!-- Document list -->
   <section id="view-list" class="view hidden">
     <div id="alerts"></div>
     <div class="toolbar">
@@ -69,13 +66,10 @@
     </details>
   </section>
 
-  <!-- Add / edit form -->
   <section id="view-edit" class="view hidden">
     <h2 id="edit-title">Add document</h2>
     <form id="form-doc">
-      <label>Title
-        <input id="f-title" required>
-      </label>
+      <label>Title <input id="f-title" required></label>
       <label>Type
         <select id="f-type">
           <option>Identity</option>
@@ -87,18 +81,10 @@
           <option>Other</option>
         </select>
       </label>
-      <label>Document number
-        <input id="f-number">
-      </label>
-      <label>Issue date
-        <input type="date" id="f-issue">
-      </label>
-      <label>Expiry date
-        <input type="date" id="f-expiry">
-      </label>
-      <label>Notes
-        <textarea id="f-notes" rows="3"></textarea>
-      </label>
+      <label>Document number <input id="f-number"></label>
+      <label>Issue date <input type="date" id="f-issue"></label>
+      <label>Expiry date <input type="date" id="f-expiry"></label>
+      <label>Notes <textarea id="f-notes" rows="3"></textarea></label>
       <label>File (PDF or image)
         <input type="file" id="f-file" accept="image/*,application/pdf">
       </label>
@@ -110,7 +96,6 @@
     </form>
   </section>
 
-  <!-- Document detail -->
   <section id="view-detail" class="view hidden">
     <div id="detail"></div>
     <div class="row">
@@ -122,21 +107,22 @@
   </section>
 </main>
 
-<script src="app.js" defer></script> 
-  <script src="picker.js" defer></script>
-  <script src="vault2.js" defer></script>
-  <script src="vault2-ui.js" defer></script>
-  <script src="smart.js" defer></script>
-<script src="ui.js" defer></script>
-  <script src="issuer.js" defer></script>
-  <script src="issuer2.js" defer></script>
-  <script src="agent-fix.js" defer></script>
-<script src="docs2.js" defer></script>
-<script src="backup.js" defer></script>
-<script src="profile-click.js" defer></script>
-<script src="nav.js" defer></script>
-<script src="passwords.js" defer></script>
-<script src="agent.js" defer></script>
-<script src="learn.js" defer></script>
+<script src="app.js?v=7" defer></script>
+<script src="picker.js?v=7" defer></script>
+<script src="vault2.js?v=7" defer></script>
+<script src="vault2-ui.js?v=7" defer></script>
+<script src="smart.js?v=7" defer></script>
+<script src="ui.js?v=7" defer></script>
+<script src="issuer.js?v=7" defer></script>
+<script src="issuer2.js?v=7" defer></script>
+<script src="docs2.js?v=7" defer></script>
+<script src="backup.js?v=7" defer></script>
+<script src="profile-click.js?v=7" defer></script>
+<script src="nav.js?v=7" defer></script>
+<script src="passwords.js?v=7" defer></script>
+<script src="agent.js?v=7" defer></script>
+<script src="learn.js?v=7" defer></script>
+<script src="agent-fix.js?v=7" defer></script>
+<script src="agent-test.js?v=7" defer></script>
 </body>
-    </html>
+  </html>
