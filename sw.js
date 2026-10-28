@@ -1,4 +1,4 @@
-const CACHE = 'vault-v7';   // bump on every release
+const CACHE = 'vault-v8';   // bump on every release
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json', 'icon.svg'];
 
